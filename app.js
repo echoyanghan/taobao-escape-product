@@ -1214,6 +1214,7 @@ function homeView() {
       <div class="secondary-actions">
         <button id="manualInput" type="button">无法上传？手动输入 ›</button>
       </div>
+      <p class="prototype-disclosure">独立体验原型 · 非淘宝官方 · 不产生真实交易</p>
     </section>
 
     <section class="section">
@@ -1718,6 +1719,24 @@ function mineView() {
       </div>
       <div class="recent-ledger-list">
         ${recentRecords.map((record) => ledgerRecordView(record)).join("") || `<div class="empty">还没有记录。完成一笔体验订单后，这里会出现最近的决定。</div>`}
+      </div>
+    </section>
+
+    <section class="prototype-info" aria-labelledby="prototypeInfoTitle">
+      <div class="prototype-info-head">
+        <span>关于产品</span>
+        <h3 id="prototypeInfoTitle">逃宝是什么</h3>
+      </div>
+      <p>逃宝是一款消费冲动代偿体验原型：今晚先在这里完成一次模拟购买，明早再判断是否真的需要。</p>
+      <ol class="prototype-steps">
+        <li><i>1</i><span><strong>导入</strong>上传购物车截图，或手动添加商品</span></li>
+        <li><i>2</i><span><strong>体验</strong>完成模拟结算，不会发生真实扣款或发货</span></li>
+        <li><i>3</i><span><strong>确认</strong>第二天重新决定省下，还是认真买下</span></li>
+      </ol>
+      <div class="prototype-legal-note">
+        <strong>原型与隐私说明</strong>
+        <p>本项目为独立、非商业产品原型，与淘宝、支付宝、微信及页面所示品牌不存在隶属、授权、合作或背书关系。当前版本的截图仅在本机浏览器中读取和预览，不会由本项目上传至服务器；请仍避免选择含姓名、地址、手机号等个人信息的图片。</p>
+        <p>页面中的第三方名称、商标与商品图片权利归其各自权利人所有，仅用于原型研究与功能演示，不代表已取得公开传播或商业使用授权。</p>
       </div>
     </section>
   `);
