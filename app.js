@@ -926,10 +926,15 @@ function deleteSelectedLedgerOrders() {
   const ids = new Set(state.ledgerSelectedIds);
   if (!ids.size) return;
   const count = ids.size;
-  state.orders = state.orders.map((order) => ({
-    ...order,
-    items: (order.items || []).map((item) => (ids.has(ledgerId(order, item)) ? { ...item, ledgerDeleted: true } : item))
-  }));
+  state.orders = state.orders
+    .map((order) => ({
+      ...order,
+      items: (order.items || []).map((item) => (ids.has(ledgerId(order, item)) ? { ...item, ledgerDeleted: true } : item))
+    }))
+    .filter((order) => (order.items || []).some((item) => !item.ledgerDeleted));
+  if (!state.orders.some((order) => order.id === state.activeOrderId)) {
+    state.activeOrderId = state.orders[0]?.id || null;
+  }
   state.ledgerSelectedIds = [];
   state.pendingLedgerDelete = false;
   state.ledgerEditing = false;
