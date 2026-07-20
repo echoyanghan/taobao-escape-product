@@ -266,7 +266,7 @@ export default async function handler(request, response) {
       Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
       "Content-Type": "application/json"
     };
-    const imagePart = { image, min_pixels: 3072, max_pixels: 8388608 };
+    const imagePart = { image, min_pixels: 65536, max_pixels: 8388608 };
     const model = process.env.QWEN_VISION_MODEL || DEFAULT_MODEL;
     const extractResponse = await fetch(endpoint, {
       method: "POST",
