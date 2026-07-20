@@ -639,8 +639,8 @@ function cropImage(image, crop) {
   ctx.fillRect(0, 0, size, size);
   const sx = Math.max(0, Number(crop?.x) || 0) * image.naturalWidth;
   const sy = Math.max(0, Number(crop?.y) || 0) * image.naturalHeight;
-  const sw = Math.min(image.naturalWidth - sx, Math.max(1, Number(crop?.w) || 0) * image.naturalWidth);
-  const sh = Math.min(image.naturalHeight - sy, Math.max(1, Number(crop?.h) || 0) * image.naturalHeight);
+  const sw = Math.min(image.naturalWidth - sx, Math.max(1 / image.naturalWidth, Number(crop?.w) || 0) * image.naturalWidth);
+  const sh = Math.min(image.naturalHeight - sy, Math.max(1 / image.naturalHeight, Number(crop?.h) || 0) * image.naturalHeight);
   const scale = Math.min(size / sw, size / sh);
   const width = sw * scale;
   const height = sh * scale;
