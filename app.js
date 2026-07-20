@@ -35,53 +35,6 @@ const recommendationBatches = [
   ["escape-01", "escape-02", "escape-03", "escape-04", "food-05", "fashion-08", "home-06", "digital-02", "beauty-07", "home-02", "fashion-03", "digital-07"]
 ];
 
-const demoScanItems = [
-  {
-    title: "影子星球美式条纹小马",
-    platform: "淘宝 影子星球",
-    price: 88.2,
-    originalPrice: 98,
-    qty: 1,
-    spec: "蓝色；M",
-    note: "超级立减 9.8 元",
-    category: "服饰",
-    icon: "👕"
-  },
-  {
-    title: "影子星球复古格子宽松",
-    platform: "淘宝 影子星球",
-    price: 98,
-    originalPrice: 109,
-    qty: 2,
-    spec: "蓝色；M",
-    note: "超级立减 11 元",
-    category: "服饰",
-    icon: "👔"
-  },
-  {
-    title: "达蒙岛原创复古3D领带印花连帽格子长袖衬衫",
-    platform: "淘宝 达蒙岛",
-    price: 106,
-    originalPrice: 118,
-    qty: 1,
-    spec: "格子；M",
-    note: "超级立减 12 元",
-    category: "服饰",
-    icon: "🧥"
-  },
-  {
-    title: "OV EuroV 原创卡通恶搞小狗印花",
-    platform: "淘宝 OV EuroV",
-    price: 106,
-    originalPrice: 118,
-    qty: 1,
-    spec: "蓝色；M",
-    note: "满 199 减 5",
-    category: "服饰",
-    icon: "👚"
-  }
-];
-
 const platformPatterns = [
   { name: "淘宝", test: /taobao|tb\.cn|tmall/i },
   { name: "京东", test: /jd\.com|jingdong/i },
@@ -139,6 +92,11 @@ const state = {
   scanItems: [],
   scanFileName: "",
   scanPreview: "",
+  scanSource: "",
+  scanStatus: "idle",
+  scanError: "",
+  scanMeta: null,
+  scanRequestId: null,
   couponClaimed: JSON.parse(localStorage.getItem("taobao_escape_coupon") || "false"),
   cartManaging: false,
   pendingDeleteId: null,
@@ -407,6 +365,11 @@ function selectedScanItems() {
   return state.scanItems.filter((item) => item.selected !== false);
 }
 
+function scanItemsReady() {
+  const selected = selectedScanItems();
+  return selected.length > 0 && selected.every((item) => String(item.title || "").trim() && Number(item.price) > 0);
+}
+
 function cartItemCount() {
   return state.cart.reduce((sum, item) => sum + (Number(item.qty) || 1), 0);
 }
@@ -440,7 +403,7 @@ function mergeCartItems(existingItems, incomingItems) {
 }
 
 function scanTotal() {
-  return selectedScanItems().reduce((sum, item) => sum + item.price * item.qty, 0);
+  return selectedScanItems().reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.qty) || 1), 0);
 }
 
 function dateKey(date = new Date()) {
@@ -517,6 +480,7 @@ function addDraftToCart() {
   state.cart = mergeCartItems(state.cart, [item]);
   state.draftLink = "";
   state.view = "cart";
+  state.route = null;
   save();
   closeImport();
   render();
@@ -673,45 +637,135 @@ function cropImage(image, crop) {
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#f5f6f8";
   ctx.fillRect(0, 0, size, size);
-  ctx.drawImage(
-    image,
-    crop.x * image.naturalWidth,
-    crop.y * image.naturalHeight,
-    crop.w * image.naturalWidth,
-    crop.h * image.naturalHeight,
-    0,
-    0,
-    size,
-    size
-  );
+  const sx = Math.max(0, Number(crop?.x) || 0) * image.naturalWidth;
+  const sy = Math.max(0, Number(crop?.y) || 0) * image.naturalHeight;
+  const sw = Math.min(image.naturalWidth - sx, Math.max(1, Number(crop?.w) || 0) * image.naturalWidth);
+  const sh = Math.min(image.naturalHeight - sy, Math.max(1, Number(crop?.h) || 0) * image.naturalHeight);
+  const scale = Math.min(size / sw, size / sh);
+  const width = sw * scale;
+  const height = sh * scale;
+  ctx.drawImage(image, sx, sy, sw, sh, (size - width) / 2, (size - height) / 2, width, height);
   return canvas.toDataURL("image/jpeg", 0.86);
 }
 
+async function prepareScreenshot(file) {
+  if (!file?.type?.startsWith("image/")) throw new Error("请选择 JPG、PNG 或 WebP 图片");
+  if (file.size > 20 * 1024 * 1024) throw new Error("原图超过 20MB，请先裁短或压缩后重试");
+  const sourceUrl = URL.createObjectURL(file);
+  try {
+    const image = await loadImage(sourceUrl);
+    const maxWidth = 1600;
+    const maxPixels = 8_000_000;
+    const widthScale = Math.min(1, maxWidth / image.naturalWidth);
+    const pixelScale = Math.min(1, Math.sqrt(maxPixels / (image.naturalWidth * image.naturalHeight)));
+    const scale = Math.min(widthScale, pixelScale);
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(image, 0, 0, width, height);
+    let dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+    if (dataUrl.length > 3_400_000) dataUrl = canvas.toDataURL("image/jpeg", 0.78);
+    if (dataUrl.length > 4_000_000) throw new Error("这张长截图仍然太大，请裁成两张后分别导入");
+    return { dataUrl, width, height };
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
+  }
+}
+
+function recognitionApiEndpoint() {
+  if (window.TAOBAO_ESCAPE_RECOGNITION_API) return window.TAOBAO_ESCAPE_RECOGNITION_API;
+  if (window.location.hostname.endsWith("github.io")) return "";
+  return "/api/recognize-cart";
+}
+
+function normalizeRecognitionItem(item, image) {
+  const confidence = Math.max(0, Math.min(1, Number(item.confidence) || 0));
+  const priceConfidence = Math.max(0, Math.min(1, Number(item.priceConfidence) || 0));
+  const warnings = Array.isArray(item.warnings) ? item.warnings.filter(Boolean) : [];
+  return {
+    id: uid(),
+    title: String(item.title || "").trim(),
+    platform: String(item.shop || "淘宝购物车").trim(),
+    price: Number(item.price) > 0 ? Number(item.price) : "",
+    originalPrice: Number(item.originalPrice) > 0 ? Number(item.originalPrice) : null,
+    qty: Math.max(1, Math.round(Number(item.qty) || 1)),
+    spec: String(item.spec || "").trim(),
+    note: warnings[0] || (priceConfidence >= 0.78 ? "价格已识别，请核对" : "价格可能有歧义，请确认"),
+    category: "其他",
+    icon: "宝",
+    image: item.crop && image ? cropImage(image, item.crop) : "",
+    confidence,
+    priceConfidence,
+    warnings,
+    selected: true
+  };
+}
+
 async function startScreenshotScan(file) {
-  if (state.scanPreview) URL.revokeObjectURL(state.scanPreview);
+  const requestId = uid();
+  state.scanRequestId = requestId;
   state.scanFileName = file?.name || "淘宝购物车截图";
   state.scanPreview = file ? URL.createObjectURL(file) : "";
-  const image = state.scanPreview ? await loadImage(state.scanPreview) : null;
-  const crops = [
-    { x: 0.128, y: 0.214, w: 0.22, h: 0.102 },
-    { x: 0.128, y: 0.337, w: 0.22, h: 0.102 },
-    { x: 0.128, y: 0.520, w: 0.22, h: 0.102 },
-    { x: 0.128, y: 0.704, w: 0.22, h: 0.102 }
-  ];
-  state.scanItems = demoScanItems.map((item, index) => ({
-    ...item,
-    id: uid(),
-    image: image ? cropImage(image, crops[index]) : "",
-    selected: true
-  }));
+  state.scanSource = "";
+  state.scanItems = [];
+  state.scanStatus = "loading";
+  state.scanError = "";
+  state.scanMeta = null;
   state.route = "scan";
-  save();
+  render();
+  try {
+    const prepared = await prepareScreenshot(file);
+    if (state.scanRequestId !== requestId) return;
+    if (state.scanPreview?.startsWith("blob:")) URL.revokeObjectURL(state.scanPreview);
+    state.scanPreview = prepared.dataUrl;
+    state.scanSource = prepared.dataUrl;
+    render();
+    const endpoint = recognitionApiEndpoint();
+    if (!endpoint) throw new Error("真实识别版正在迁移到 Vercel，请稍后使用新的体验地址");
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image: prepared.dataUrl,
+        width: prepared.width,
+        height: prepared.height,
+        fileName: state.scanFileName
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const errorMessage = typeof result.error === "string" ? result.error : result.error?.message;
+      throw new Error(errorMessage || "没有识别到完整商品，请换一张截图重试");
+    }
+    const image = await loadImage(prepared.dataUrl);
+    if (state.scanRequestId !== requestId) return;
+    state.scanItems = (result.items || []).map((item) => normalizeRecognitionItem(item, image)).filter((item) => item.title);
+    if (!state.scanItems.length) throw new Error("没有识别到完整商品，请上传包含标题和价格的购物车截图");
+    state.scanStatus = "success";
+    state.scanMeta = result.meta || null;
+    state.scanError = "";
+  } catch (error) {
+    if (state.scanRequestId !== requestId) return;
+    state.scanItems = [];
+    state.scanStatus = "error";
+    state.scanError = error?.message || "识别失败，请重新上传";
+  }
   render();
 }
 
 function importScanItems() {
   const itemsToImport = selectedScanItems();
   if (!itemsToImport.length) return;
+  if (!scanItemsReady()) {
+    showToast("请先补全所选商品的名称和价格");
+    render();
+    return;
+  }
   const incomingItems = itemsToImport.map((item) => ({
       id: uid(),
       title: item.title,
@@ -728,6 +782,11 @@ function importScanItems() {
   state.cart = mergeCartItems(state.cart, incomingItems);
   state.scanItems = [];
   state.scanFileName = "";
+  state.scanPreview = "";
+  state.scanSource = "";
+  state.scanStatus = "idle";
+  state.scanError = "";
+  state.scanMeta = null;
   state.view = "cart";
   state.route = null;
   save();
@@ -739,7 +798,7 @@ function updateScanItem(id, field, value) {
   if (!allowedFields.has(field)) return;
   state.scanItems = state.scanItems.map((item) => {
     if (item.id !== id) return item;
-    if (field === "price") return { ...item, price: Math.max(0.1, Number(value) || 0.1) };
+    if (field === "price") return { ...item, price: Number(value) > 0 ? Number(value) : "", priceConfidence: 1, warnings: [] };
     if (field === "qty") return { ...item, qty: Math.max(1, Math.round(Number(value) || 1)) };
     return { ...item, [field]: value };
   });
@@ -1302,6 +1361,20 @@ function productView() {
 }
 
 function scanView() {
+  const isLoading = state.scanStatus === "loading";
+  const isError = state.scanStatus === "error";
+  const isSuccess = state.scanStatus === "success";
+  const reviewCount = state.scanItems.filter((item) => !Number(item.price) || item.priceConfidence < 0.78).length;
+  const heroTitle = isLoading
+    ? "正在读取商品和价格"
+    : isError
+      ? "这张截图暂时没认出来"
+      : `识别到 ${state.scanItems.length} 件商品`;
+  const heroHint = isLoading
+    ? "通常需要几秒，请不要关闭页面。"
+    : isError
+      ? state.scanError
+      : "导入前请核对商品、数量和实际价格。";
   return `
     <div class="app">
       <section class="scan-page">
@@ -1310,45 +1383,75 @@ function scanView() {
           ${state.scanPreview ? `<img src="${state.scanPreview}" alt="购物车截图预览" />` : `<div class="scan-placeholder">淘宝购物车截图</div>`}
           <div>
             <p class="mini">${esc(state.scanFileName || "购物车截图")}</p>
-            <h3>已从淘宝识别 ${state.scanItems.length} 件商品</h3>
-            <p class="hint">请选择今晚想放进逃宝购物车的商品。</p>
+            <h3>${esc(heroTitle)}</h3>
+            <p class="hint">${esc(heroHint)}</p>
           </div>
         </article>
-        <section class="scan-summary">
-          <div><span>已选金额</span><strong>${money.format(scanTotal())}</strong></div>
-          <div><span>主要品类</span><strong>服饰</strong></div>
-          <div><span>来源</span><strong>淘宝购物车</strong></div>
-        </section>
-        <section class="cart-store">
-          <div class="cart-head"><h3>淘宝购物车</h3><span class="sub">已选 ${selectedScanItems().length} 件</span></div>
-          ${state.scanItems
-            .map(
-              (item) => `
-                <article class="cart-item">
-                  <button class="check ${item.selected !== false ? "checked" : ""}" data-toggle-scan="${item.id}" type="button" aria-label="选择商品"></button>
-                  <div class="thumb">${item.image ? `<img src="${item.image}" alt="${esc(item.title)}" />` : item.icon}</div>
-                  <div class="item-info">
-                    <label class="scan-edit-title">
-                      <span>商品名</span>
-                      <input data-scan-item="${item.id}" data-scan-field="title" value="${esc(item.title)}" />
-                    </label>
-                    <div class="scan-edit-row">
-                      <label><span>规格</span><input data-scan-item="${item.id}" data-scan-field="spec" value="${esc(item.spec)}" /></label>
-                      <label><span>数量</span><input data-scan-item="${item.id}" data-scan-field="qty" type="number" min="1" value="${item.qty}" /></label>
-                    </div>
-                    <div class="labels"><span>${esc(item.note)}</span><span>7 天价保</span></div>
-                    <label class="scan-price"><span>识别价格 ¥</span><input data-scan-item="${item.id}" data-scan-field="price" type="number" min="0.1" step="0.1" value="${item.price}" /></label>
-                  </div>
-                </article>
-              `
-            )
-            .join("")}
-        </section>
+        <input id="screenshotInput" type="file" accept="image/jpeg,image/png,image/webp" hidden />
+        ${
+          isLoading
+            ? `<section class="scan-progress" aria-live="polite">
+                <span class="scan-spinner" aria-hidden="true"></span>
+                <div><strong>Qwen OCR 正在识别</strong><p>读取文字位置 · 区分当前价与优惠 · 划分完整商品</p></div>
+              </section>`
+            : ""
+        }
+        ${
+          isError
+            ? `<section class="scan-error" role="alert">
+                <strong>没有生成演示结果</strong>
+                <p>${esc(state.scanError)}</p>
+                <div><button class="primary" id="uploadScreenshot" type="button">重新上传</button><button class="ghost-action" id="manualInput" type="button">手动添加</button></div>
+              </section>`
+            : ""
+        }
+        ${
+          isSuccess
+            ? `<section class="scan-summary">
+                <div><span>已选金额</span><strong>${money.format(scanTotal())}</strong></div>
+                <div><span>需要确认</span><strong>${reviewCount} 件</strong></div>
+                <div><span>识别方式</span><strong>Qwen OCR</strong></div>
+              </section>
+              <p class="scan-review-note">AI 可能看错价格。橙色项目请优先核对，确认后再导入。</p>
+              <section class="cart-store scan-results">
+                <div class="cart-head"><h3>识别结果</h3><span class="sub">已选 ${selectedScanItems().length} 件</span></div>
+                ${state.scanItems
+                  .map((item) => {
+                    const needsReview = !Number(item.price) || item.priceConfidence < 0.78;
+                    const confidenceLabel = !Number(item.price) ? "需填写价格" : needsReview ? "请确认价格" : "识别清晰";
+                    return `
+                      <article class="cart-item scan-result-item ${needsReview ? "needs-review" : ""}">
+                        <button class="check ${item.selected !== false ? "checked" : ""}" data-toggle-scan="${item.id}" type="button" aria-label="选择商品"></button>
+                        <div class="thumb">${item.image ? `<img src="${item.image}" alt="${esc(item.title)}" />` : item.icon}</div>
+                        <div class="item-info">
+                          <div class="scan-confidence ${needsReview ? "review" : "clear"}">${confidenceLabel}</div>
+                          <label class="scan-edit-title">
+                            <span>商品名</span>
+                            <input data-scan-item="${item.id}" data-scan-field="title" value="${esc(item.title)}" />
+                          </label>
+                          <div class="scan-edit-row">
+                            <label><span>规格</span><input data-scan-item="${item.id}" data-scan-field="spec" value="${esc(item.spec)}" placeholder="未识别" /></label>
+                            <label><span>数量</span><input data-scan-item="${item.id}" data-scan-field="qty" type="number" min="1" value="${item.qty}" /></label>
+                          </div>
+                          <p class="scan-warning">${esc(item.note)}</p>
+                          <label class="scan-price ${needsReview ? "review" : ""}"><span>当前单价 ¥</span><input data-scan-item="${item.id}" data-scan-field="price" type="number" min="0.1" step="0.1" value="${item.price}" placeholder="请填写" /></label>
+                        </div>
+                      </article>
+                    `;
+                  })
+                  .join("")}
+              </section>`
+            : ""
+        }
       </section>
-      <div class="fixed-pay">
-        <span>合计 <strong class="danger">${money.format(scanTotal())}</strong></span>
-        <button class="primary" id="importScan" ${selectedScanItems().length ? "" : "disabled"} type="button">导入购物车</button>
-      </div>
+      ${
+        isSuccess
+          ? `<div class="fixed-pay">
+              <span>合计 <strong class="danger">${money.format(scanTotal())}</strong></span>
+              <button class="primary" id="importScan" ${scanItemsReady() ? "" : "disabled"} type="button">确认并导入</button>
+            </div>`
+          : ""
+      }
       ${bottomNav()}
     </div>
   `;
@@ -1735,7 +1838,7 @@ function mineView() {
       </ol>
       <div class="prototype-legal-note">
         <strong>原型与隐私说明</strong>
-        <p>本项目为独立、非商业产品原型，与淘宝、支付宝、微信及页面所示品牌不存在隶属、授权、合作或背书关系。当前版本的截图仅在本机浏览器中读取和预览，不会由本项目上传至服务器；请仍避免选择含姓名、地址、手机号等个人信息的图片。</p>
+        <p>本项目为独立、非商业产品原型，与淘宝、支付宝、微信及页面所示品牌不存在隶属、授权、合作或背书关系。使用智能识别时，截图会经逃宝服务端转发至阿里云百炼 Qwen OCR，识别完成后本项目不主动保存原图；请避免选择含姓名、地址、手机号等个人信息的图片。</p>
         <p>页面中的第三方名称、商标与商品图片权利归其各自权利人所有，仅用于原型研究与功能演示，不代表已取得公开传播或商业使用授权。</p>
       </div>
     </section>
@@ -1845,6 +1948,17 @@ function render() {
 
 app.addEventListener("input", (event) => {
   if (event.target.id === "linkInput") state.draftLink = event.target.value;
+  const scanInput = event.target.closest("[data-scan-item][data-scan-field]");
+  if (scanInput) {
+    updateScanItem(scanInput.dataset.scanItem, scanInput.dataset.scanField, scanInput.value);
+    const total = money.format(scanTotal());
+    const summaryAmount = app.querySelector(".scan-summary div:first-child strong");
+    const footerAmount = app.querySelector(".fixed-pay .danger");
+    const importButton = app.querySelector("#importScan");
+    if (summaryAmount) summaryAmount.textContent = total;
+    if (footerAmount) footerAmount.textContent = total;
+    if (importButton) importButton.disabled = !scanItemsReady();
+  }
 });
 
 app.addEventListener("click", (event) => {
@@ -2016,6 +2130,7 @@ app.addEventListener("click", (event) => {
     render();
   }
   if (viewButton) {
+    if (state.route === "scan") state.scanRequestId = null;
     if (state.route === "ledger") {
       state.ledgerEditing = false;
       state.ledgerSelectedIds = [];
@@ -2042,6 +2157,7 @@ app.addEventListener("click", (event) => {
     render();
   }
   if (event.target.closest("[data-route-home]")) {
+    if (state.route === "scan") state.scanRequestId = null;
     state.view = "home";
     state.route = null;
     render();
@@ -2074,9 +2190,13 @@ app.addEventListener("change", (event) => {
   if (event.target.id === "screenshotInput") {
     const file = event.target.files?.[0];
     if (file) startScreenshotScan(file);
+    event.target.value = "";
   }
   const scanInput = event.target.closest("[data-scan-item][data-scan-field]");
-  if (scanInput) updateScanItem(scanInput.dataset.scanItem, scanInput.dataset.scanField, scanInput.value);
+  if (scanInput) {
+    updateScanItem(scanInput.dataset.scanItem, scanInput.dataset.scanField, scanInput.value);
+    render();
+  }
 });
 
 document.querySelector("#closeModal").addEventListener("click", closeImport);
