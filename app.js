@@ -94,6 +94,8 @@ const state = {
   scanPreview: "",
   scanSource: "",
   scanStatus: "idle",
+  scanPhase: "prepare",
+  scanProgress: 12,
   scanError: "",
   scanMeta: null,
   scanRequestId: null,
@@ -125,6 +127,7 @@ const modal = document.querySelector("#importModal");
 const draftPlatform = document.querySelector("#draftPlatform");
 const draftTitle = document.querySelector("#draftTitle");
 const draftPrice = document.querySelector("#draftPrice");
+let scanProgressTimer = null;
 
 const money = new Intl.NumberFormat("zh-CN", {
   style: "currency",
@@ -740,6 +743,8 @@ async function startScreenshotScan(file) {
   state.scanSource = "";
   state.scanItems = [];
   state.scanStatus = "loading";
+  state.scanPhase = "prepare";
+  state.scanProgress = 12;
   state.scanError = "";
   state.scanMeta = null;
   state.route = "scan";
@@ -750,7 +755,10 @@ async function startScreenshotScan(file) {
     if (state.scanPreview?.startsWith("blob:")) URL.revokeObjectURL(state.scanPreview);
     state.scanPreview = prepared.dataUrl;
     state.scanSource = prepared.dataUrl;
+    state.scanPhase = "recognize";
+    state.scanProgress = 36;
     render();
+    startRecognitionProgress(requestId);
     const endpoint = recognitionApiEndpoint();
     if (!endpoint) throw new Error("真实识别服务尚未配置，请稍后重试");
     const response = await fetch(endpoint, {
@@ -768,20 +776,57 @@ async function startScreenshotScan(file) {
       const errorMessage = typeof result.error === "string" ? result.error : result.error?.message;
       throw new Error(errorMessage || "没有识别到完整商品，请换一张截图重试");
     }
+    state.scanPhase = "organize";
+    state.scanProgress = 94;
+    stopRecognitionProgress();
+    render();
     const image = await loadImage(prepared.dataUrl);
     if (state.scanRequestId !== requestId) return;
     state.scanItems = (result.items || []).map((item) => normalizeRecognitionItem(item, image)).filter((item) => item.title);
     if (!state.scanItems.length) throw new Error("没有识别到完整商品，请上传包含标题和价格的购物车截图");
     state.scanStatus = "success";
+    state.scanPhase = "prepare";
+    state.scanProgress = 100;
     state.scanMeta = result.meta || null;
     state.scanError = "";
   } catch (error) {
     if (state.scanRequestId !== requestId) return;
+    stopRecognitionProgress();
     state.scanItems = [];
     state.scanStatus = "error";
+    state.scanPhase = "prepare";
+    state.scanProgress = 12;
     state.scanError = error?.message || "识别失败，请重新上传";
   }
   render();
+}
+
+function updateRecognitionProgress() {
+  const progress = Math.round(state.scanProgress);
+  const progressbar = app.querySelector(".scan-progress-track");
+  const fill = progressbar?.querySelector("i");
+  progressbar?.setAttribute("aria-valuenow", String(progress));
+  if (fill) fill.style.width = `${progress}%`;
+}
+
+function stopRecognitionProgress() {
+  if (!scanProgressTimer) return;
+  clearInterval(scanProgressTimer);
+  scanProgressTimer = null;
+}
+
+function startRecognitionProgress(requestId) {
+  stopRecognitionProgress();
+  scanProgressTimer = setInterval(() => {
+    if (state.scanRequestId !== requestId || state.scanStatus !== "loading") {
+      stopRecognitionProgress();
+      return;
+    }
+    if (state.scanPhase !== "recognize") return;
+    const increment = state.scanProgress < 70 ? 2 : 0.35;
+    state.scanProgress = Math.min(88, state.scanProgress + increment);
+    updateRecognitionProgress();
+  }, 1000);
 }
 
 function importScanItems() {
@@ -811,6 +856,8 @@ function importScanItems() {
   state.scanPreview = "";
   state.scanSource = "";
   state.scanStatus = "idle";
+  state.scanPhase = "prepare";
+  state.scanProgress = 12;
   state.scanError = "";
   state.scanMeta = null;
   state.view = "cart";
@@ -842,16 +889,27 @@ function activeOrder() {
 }
 
 function currentLogisticsStage(order) {
-  if (!order?.createdTimestamp) return order?.logisticsStage || 0;
+  const savedStage = Math.max(0, Number(order?.logisticsStage) || 0);
+  if (!order?.createdTimestamp) return savedStage;
   const elapsedSeconds = Math.max(0, Math.floor((Date.now() - order.createdTimestamp) / 1000));
-  return stageDurations.reduce((stage, seconds, index) => (elapsedSeconds >= seconds ? index : stage), 0);
+  const timedStage = stageDurations.reduce((stage, seconds, index) => (elapsedSeconds >= seconds ? index : stage), 0);
+  return Math.max(savedStage, timedStage);
 }
 
 function deliveryOrders() {
   return state.orders.filter((order) => {
+    const hasPendingItems = (order.items || []).some((item) => item.decision === "pending" && !item.ledgerDeleted);
     const finalStage = Math.max(0, (order.logisticsTimeline || []).length - 1);
-    return currentLogisticsStage(order) < finalStage;
+    return hasPendingItems && currentLogisticsStage(order) < finalStage;
   });
+}
+
+function completeActiveOrderLogistics() {
+  const order = activeOrder();
+  if (!order) return;
+  const finalStage = Math.max(0, (order.logisticsTimeline || []).length - 1);
+  state.orders = state.orders.map((item) => item.id === order.id ? { ...item, logisticsStage: finalStage } : item);
+  save();
 }
 
 function updateOrderItem(orderId, itemId, updater) {
@@ -1403,13 +1461,20 @@ function scanView() {
   const isError = state.scanStatus === "error";
   const isSuccess = state.scanStatus === "success";
   const reviewCount = state.scanItems.filter((item) => !Number(item.price) || item.priceConfidence < 0.78).length;
+  const scanPhases = {
+    prepare: { title: "正在读取截图", hint: "压缩图片并准备上传", step: 0 },
+    recognize: { title: "AI 正在识别商品", hint: "正在核对标题、价格和数量，长截图可能需要半分钟以上", step: 1 },
+    organize: { title: "正在整理结果", hint: "切分商品图并生成可编辑清单", step: 2 }
+  };
+  const scanPhase = scanPhases[state.scanPhase] || scanPhases.prepare;
+  const scanProgress = Math.round(state.scanProgress);
   const heroTitle = isLoading
     ? "正在读取商品和价格"
     : isError
       ? "这张截图暂时没认出来"
       : `识别到 ${state.scanItems.length} 件商品`;
   const heroHint = isLoading
-    ? "通常需要几秒，请不要关闭页面。"
+    ? "长截图可能需要半分钟以上，请不要关闭页面。"
     : isError
       ? state.scanError
       : "导入前请核对商品、数量和实际价格。";
@@ -1429,8 +1494,11 @@ function scanView() {
         ${
           isLoading
             ? `<section class="scan-progress" aria-live="polite">
-                <span class="scan-spinner" aria-hidden="true"></span>
-                <div><strong>Qwen 视觉正在识别</strong><p>理解商品布局 · 区分当前价与优惠 · 定位完整商品</p></div>
+                <div class="scan-progress-copy"><strong>${scanPhase.title}</strong><p>${scanPhase.hint}</p></div>
+                <div class="scan-progress-track" role="progressbar" aria-label="购物车识别进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${scanProgress}"><i style="width:${scanProgress}%"></i></div>
+                <div class="scan-progress-steps">
+                  ${["读取截图", "识别商品", "整理结果"].map((label, index) => `<span class="${index < scanPhase.step ? "done" : index === scanPhase.step ? "active" : ""}">${label}</span>`).join("")}
+                </div>
               </section>`
             : ""
         }
@@ -1693,7 +1761,7 @@ function logisticsView() {
           <div class="row"><span>包裹重量</span><strong>${esc(order?.packageWeight || "0.4kg")}</strong></div>
           <div class="row"><span>收货备注</span><strong>明早本人签收</strong></div>
         </article>
-        <button class="primary full" data-route="review" type="button">快进到明早签收</button>
+        <button class="primary full" data-route="review" data-complete-logistics type="button">快进到明早签收</button>
       </section>
       ${bottomNav()}
     </div>
@@ -2216,6 +2284,7 @@ app.addEventListener("click", (event) => {
     render();
   }
   if (routeButton) {
+    if (routeButton.hasAttribute("data-complete-logistics")) completeActiveOrderLogistics();
     if (routeButton.dataset.route === "review") state.reviewReturn = "logistics";
     if (routeButton.dataset.route === "ledger") {
       state.ledgerFilter = "all";

@@ -1197,6 +1197,47 @@ button {
   background: #fff;
 }
 
+.scan-progress {
+  display: grid;
+  gap: 12px;
+}
+
+.scan-progress-copy strong {
+  font-size: 16px;
+}
+
+.scan-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #ffe7d7;
+}
+
+.scan-progress-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--orange);
+  transition: width 0.45s ease;
+}
+
+.scan-progress-steps {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.scan-progress-steps .active {
+  color: var(--orange-dark);
+  font-weight: 900;
+}
+
+.scan-progress-steps .done {
+  color: var(--green);
+}
+
 .scan-progress strong,
 .scan-error strong {
   display: block;
