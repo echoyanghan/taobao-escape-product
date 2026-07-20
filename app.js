@@ -847,6 +847,13 @@ function currentLogisticsStage(order) {
   return stageDurations.reduce((stage, seconds, index) => (elapsedSeconds >= seconds ? index : stage), 0);
 }
 
+function deliveryOrders() {
+  return state.orders.filter((order) => {
+    const finalStage = Math.max(0, (order.logisticsTimeline || []).length - 1);
+    return currentLogisticsStage(order) < finalStage;
+  });
+}
+
 function updateOrderItem(orderId, itemId, updater) {
   state.orders = state.orders.map((order) =>
     order.id === orderId
@@ -1789,7 +1796,8 @@ function messagesView() {
 
 function mineView() {
   const recentRecords = ledgerRecords().slice(0, 3);
-  const latestOrder = state.orders[0];
+  const deliveringOrders = deliveryOrders();
+  const latestDeliveringOrder = deliveringOrders[0];
   const nextOrder = pendingOrder();
   const nextItem = nextOrder?.items?.find((item) => item.decision === "pending" && !item.ledgerDeleted);
   const completedItems = confirmedSavedCount() + rationalCount();
@@ -1841,7 +1849,7 @@ function mineView() {
       <div class="account-section-head"><h3>我的订单</h3><span>${state.orders.length} 笔体验订单</span></div>
       <div class="order-status-grid">
         <button ${pendingCount() ? "data-review-pending" : "disabled"} type="button"><i class="status-warm" aria-hidden="true">⏱</i><strong>${pendingCount()}</strong><span>待确认</span></button>
-        <button ${latestOrder ? `data-open-order="${latestOrder.id}"` : "disabled"} type="button"><i class="status-blue" aria-hidden="true">🚚</i><strong>${state.orders.length}</strong><span>配送中</span></button>
+        <button ${latestDeliveringOrder ? `data-open-order="${latestDeliveringOrder.id}"` : "disabled"} type="button"><i class="status-blue" aria-hidden="true">🚚</i><strong>${deliveringOrders.length}</strong><span>配送中</span></button>
         <button data-mine-target="ledger-panel" type="button"><i class="status-green" aria-hidden="true">✓</i><strong>${completedItems}</strong><span>已处理</span></button>
       </div>
     </section>
@@ -1935,8 +1943,9 @@ function ledgerView() {
   `);
 }
 
-const scrollContainerClasses = ["content", "checkout-page", "scan-page", "review-page", "logistics-page", "product-page", "success-page"];
+const scrollContainerClasses = ["content", "checkout-page", "scan-page", "review-page", "logistics-page", "product-page", "success-page", "tabs"];
 let renderedScreenKey = null;
+let homeTabsDrag = null;
 
 function screenKey() {
   return state.route ? `route:${state.route}` : `view:${state.view}`;
@@ -1946,15 +1955,18 @@ function captureScrollPositions() {
   return scrollContainerClasses
     .map((className) => {
       const element = app.querySelector(`.${className}`);
-      return element ? [className, element.scrollTop] : null;
+      return element ? [className, element.scrollTop, element.scrollLeft] : null;
     })
     .filter(Boolean);
 }
 
 function restoreScrollPositions(positions) {
-  positions.forEach(([className, scrollTop]) => {
+  positions.forEach(([className, scrollTop, scrollLeft]) => {
     const element = app.querySelector(`.${className}`);
-    if (element) element.scrollTop = scrollTop;
+    if (element) {
+      element.scrollTop = scrollTop;
+      element.scrollLeft = scrollLeft;
+    }
   });
 }
 
@@ -1976,6 +1988,39 @@ function render() {
   renderedScreenKey = nextScreenKey;
   restoreScrollPositions(scrollPositions);
 }
+
+app.addEventListener("touchstart", (event) => {
+  const tabs = event.target.closest(".tabs");
+  if (!tabs || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  homeTabsDrag = {
+    element: tabs,
+    startX: touch.clientX,
+    startY: touch.clientY,
+    startScrollLeft: tabs.scrollLeft,
+    horizontal: false
+  };
+}, { passive: true });
+
+app.addEventListener("touchmove", (event) => {
+  if (!homeTabsDrag || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  const deltaX = touch.clientX - homeTabsDrag.startX;
+  const deltaY = touch.clientY - homeTabsDrag.startY;
+  if (!homeTabsDrag.horizontal) {
+    homeTabsDrag.horizontal = Math.abs(deltaX) > 6 && Math.abs(deltaX) > Math.abs(deltaY);
+  }
+  if (!homeTabsDrag.horizontal) return;
+  event.preventDefault();
+  homeTabsDrag.element.scrollLeft = homeTabsDrag.startScrollLeft - deltaX;
+}, { passive: false });
+
+function endHomeTabsDrag() {
+  homeTabsDrag = null;
+}
+
+app.addEventListener("touchend", endHomeTabsDrag, { passive: true });
+app.addEventListener("touchcancel", endHomeTabsDrag, { passive: true });
 
 app.addEventListener("input", (event) => {
   if (event.target.id === "linkInput") state.draftLink = event.target.value;

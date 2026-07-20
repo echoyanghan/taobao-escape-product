@@ -133,14 +133,20 @@ button {
 }
 
 .tabs {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   gap: 18px;
   margin-top: 18px;
   overflow-x: auto;
   overflow-y: hidden;
+  flex-wrap: nowrap;
   white-space: nowrap;
   font-size: 18px;
   font-weight: 800;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
 }
 
 .tabs::-webkit-scrollbar {
