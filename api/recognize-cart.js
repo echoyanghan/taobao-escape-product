@@ -266,7 +266,7 @@ export default async function handler(request, response) {
       Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
       "Content-Type": "application/json"
     };
-    const imagePart = { image, min_pixels: 65536, max_pixels: 8388608 };
+    const imagePart = { image, min_pixels: 65536, max_pixels: 1605632 };
     const model = process.env.QWEN_VISION_MODEL || DEFAULT_MODEL;
     const extractResponse = await fetch(endpoint, {
       method: "POST",
@@ -280,7 +280,7 @@ export default async function handler(request, response) {
             content: [imagePart, { text: promptForScreenshot(width, height) }]
           }]
         },
-        parameters: { max_tokens: 4096, temperature: 0.01, enable_thinking: false }
+        parameters: { max_tokens: 2048, temperature: 0.01, enable_thinking: false }
       })
     });
     const extractPayload = await extractResponse.json().catch(() => ({}));
