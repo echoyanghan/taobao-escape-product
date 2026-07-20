@@ -629,6 +629,15 @@ function loadImage(src) {
   });
 }
 
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("读取图片失败，请重新选择"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function cropImage(image, crop) {
   const canvas = document.createElement("canvas");
   const size = 220;
@@ -649,11 +658,13 @@ function cropImage(image, crop) {
 }
 
 async function prepareScreenshot(file) {
-  if (!file?.type?.startsWith("image/")) throw new Error("请选择 JPG、PNG 或 WebP 图片");
+  if (!file || !["image/jpeg", "image/png", "image/webp"].includes(file.type)) throw new Error("请选择 JPG、PNG 或 WebP 图片");
   if (file.size > 20 * 1024 * 1024) throw new Error("原图超过 20MB，请先裁短或压缩后重试");
   const sourceUrl = URL.createObjectURL(file);
+  let bitmap = null;
   try {
     const image = await loadImage(sourceUrl);
+    if (typeof image.decode === "function") await image.decode();
     const maxWidth = 1600;
     const maxPixels = 8_000_000;
     const widthScale = Math.min(1, maxWidth / image.naturalWidth);
@@ -661,18 +672,33 @@ async function prepareScreenshot(file) {
     const scale = Math.min(widthScale, pixelScale);
     const width = Math.max(1, Math.round(image.naturalWidth * scale));
     const height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+    // Most phone screenshots are already small enough. Keeping the original bytes
+    // avoids mobile canvas decoders occasionally blanking the lower part of long images.
+    if (scale === 1 && file.size <= 2_400_000) {
+      const dataUrl = await readFileAsDataUrl(file);
+      if (dataUrl.length <= 3_400_000) return { dataUrl, width, height };
+    }
+
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("当前浏览器无法处理这张图片，请换用 JPG 截图重试");
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, width, height);
-    ctx.drawImage(image, 0, 0, width, height);
+    if (typeof createImageBitmap === "function") {
+      bitmap = await createImageBitmap(file);
+      ctx.drawImage(bitmap, 0, 0, width, height);
+    } else {
+      ctx.drawImage(image, 0, 0, width, height);
+    }
     let dataUrl = canvas.toDataURL("image/jpeg", 0.9);
     if (dataUrl.length > 3_400_000) dataUrl = canvas.toDataURL("image/jpeg", 0.78);
     if (dataUrl.length > 4_000_000) throw new Error("这张长截图仍然太大，请裁成两张后分别导入");
     return { dataUrl, width, height };
   } finally {
+    bitmap?.close?.();
     URL.revokeObjectURL(sourceUrl);
   }
 }
