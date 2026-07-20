@@ -87,9 +87,9 @@ function cropFromBoxes(imageBox, rowBox, width, height) {
   const [, y1, , y2] = row;
   const rowHeight = y2 - y1;
   return {
-    x: 0.055,
+    x: 0.085,
     y: clamp(y1 + rowHeight * 0.08, 0, height) / height,
-    w: 0.29,
+    w: 0.24,
     h: clamp(rowHeight * 0.84, 1, height) / height
   };
 }
@@ -164,12 +164,15 @@ function fallbackItemsFromWords(words, width, height) {
         .filter((line) => line.text.length >= 4 && !/(数量|规格|颜色|尺码|店铺|发货)/.test(line.text))
         .sort((a, b) => b.text.length - a.text.length)[0]?.text;
       if (!title) return null;
+      const rowLines = lines.filter((line) => line.y >= top && line.y < bottom);
+      const qtyText = rowLines.map((line) => line.text).find((text) => /数量\s*[x×]\s*\d+/i.test(text));
+      const qty = qtyText ? Number(qtyText.match(/数量\s*[x×]\s*(\d+)/i)?.[1]) || 1 : 1;
       const rowBox = [0, clamp(top, 0, height), width, clamp(bottom, 0, height)];
       return {
         title,
         price: price.price,
         originalPrice: null,
-        qty: 1,
+        qty: clamp(qty, 1, 99),
         spec: "",
         shop: "淘宝购物车",
         rowBox,
@@ -191,9 +194,21 @@ function normalizeItems(rawItems, words, width, height) {
       const price = finiteNumber(item?.price);
       const rowBox = normalizeBox(item?.row_bbox || item?.rowBox, width, height);
       if (!title || (price !== null && (price <= 0 || price >= 100000))) return null;
-      const confidence = clamp(finiteNumber(item?.confidence) ?? 0.72, 0, 1);
-      const priceConfidence = clamp(finiteNumber(item?.price_confidence ?? item?.priceConfidence) ?? confidence, 0, 1);
+      let confidence = clamp(finiteNumber(item?.confidence) ?? 0.72, 0, 1);
+      let priceConfidence = clamp(finiteNumber(item?.price_confidence ?? item?.priceConfidence) ?? confidence, 0, 1);
       const warnings = Array.isArray(item?.warnings) ? item.warnings.map((value) => cleanText(value, 80)).filter(Boolean).slice(0, 3) : [];
+      const crop = cropFromBoxes(item?.image_bbox || item?.imageBox, rowBox, width, height);
+      const titleLooksMerged = /(?:淘宝|天猫).*(?:数量|规格|颜色|尺码)|(?:数量\s*[x×]|[；;].*(?:数量|规格|颜色|尺码))/i.test(title);
+      if (!rowBox) {
+        confidence = Math.min(confidence, 0.62);
+        priceConfidence = Math.min(priceConfidence, 0.68);
+        warnings.unshift("商品行定位不完整，请重点核对标题和价格");
+      }
+      if (titleLooksMerged) {
+        confidence = Math.min(confidence, 0.5);
+        priceConfidence = Math.min(priceConfidence, 0.5);
+        warnings.unshift("标题可能串入相邻商品信息，请手动修正");
+      }
       if (price === null) warnings.unshift("没有可靠识别到当前价格，请手动填写");
       else if (priceConfidence < 0.78 && !warnings.length) warnings.push("截图中价格可能有歧义，请确认");
       return {
@@ -204,18 +219,21 @@ function normalizeItems(rawItems, words, width, height) {
         spec: cleanText(item?.spec, 100),
         shop: cleanText(item?.shop || "淘宝购物车", 80),
         rowBox,
-        crop: cropFromBoxes(item?.image_bbox || item?.imageBox, rowBox, width, height),
+        crop,
         confidence,
         priceConfidence,
-        warnings
+        warnings: warnings.slice(0, 3)
       };
     })
     .filter(Boolean);
-  return normalized.length ? normalized : fallbackItemsFromWords(words, width, height);
+  const fallback = fallbackItemsFromWords(words, width, height);
+  const positionedCount = normalized.filter((item) => item.rowBox).length;
+  if (fallback.length >= normalized.length && positionedCount < Math.ceil(normalized.length * 0.6)) return fallback;
+  return normalized.length ? normalized : fallback;
 }
 
 function promptForScreenshot(width, height) {
-  return `你是电商购物车截图识别器。截图尺寸为 ${width}x${height} 像素。请只提取截图中完整可见的商品卡片，返回严格 JSON，不要 Markdown，不要解释。\n\nJSON 格式：{"items":[{"title":"商品标题","price":实际当前单价或null,"original_price":原价或null,"qty":数量,"spec":"规格","shop":"店铺或平台","row_bbox":[x1,y1,x2,y2],"image_bbox":[x1,y1,x2,y2],"confidence":0到1,"price_confidence":0到1,"warnings":[]}]}\n\n规则：\n1. 坐标必须使用原图像素，左上角为原点。row_bbox 包含整件商品，image_bbox 只包含商品主图。\n2. price 只填写单件当前成交展示价，优先券后价、到手价或实付价。不要把原价、优惠金额、满减门槛、店铺合计、运费或购物车总价当成 price。\n3. 看不清就填 null 或降低 confidence，禁止猜测、补全或创造商品。\n4. 顶部或底部被截断的商品不要返回。\n5. 同一商品只返回一次，最多 ${MAX_ITEMS} 件。`;
+  return `你是电商购物车截图识别器。截图尺寸为 ${width}x${height} 像素。请按页面从上到下逐行识别商品，返回严格 JSON，不要 Markdown，不要解释。\n\nJSON 格式：{"items":[{"title":"商品标题","price":实际当前单价或null,"original_price":原价或null,"qty":数量,"spec":"规格","shop":"店铺或平台","row_bbox":[x1,y1,x2,y2],"image_bbox":[x1,y1,x2,y2],"confidence":0到1,"price_confidence":0到1,"warnings":[]}]}\n\n规则：\n1. 先利用商品缩略图、横向分隔线和加减数量控件划分商品行，再识别每一行。返回顺序必须与页面从上到下一致。\n2. 每件商品的 title、price、qty、spec 必须全部来自同一个 row_bbox，禁止跨越分隔线读取，禁止复用上一行的标题或价格。\n3. row_bbox 和 image_bbox 为必填项，必须使用原图像素坐标，左上角为原点。row_bbox 包含整件商品，image_bbox 只包含该行商品主图。\n4. price 只填写同一商品行中醒目显示的单件当前成交价。不要把原价、优惠金额、满减门槛、店铺合计、运费或购物车总价当成 price。\n5. qty 优先读取“数量×N”或该行加减控件中间的数字。规格、平台、数量等辅助文字不要拼进 title。\n6. 只要标题与当前价格都可见，即使商品行在顶部或底部略有裁切也可以返回；缺少标题或价格时才忽略。\n7. 看不清就填 null 并降低 confidence，禁止猜测、补全或创造商品。\n8. 同一商品只返回一次，最多 ${MAX_ITEMS} 件。`;
 }
 
 export default async function handler(request, response) {
@@ -244,36 +262,49 @@ export default async function handler(request, response) {
   const timer = setTimeout(() => controller.abort(), 45000);
   const endpoint = `https://${process.env.DASHSCOPE_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation`;
   try {
-    const upstream = await fetch(endpoint, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: process.env.QWEN_OCR_MODEL || DEFAULT_MODEL,
-        input: {
-          messages: [{
-            role: "user",
-            content: [
-              { image, min_pixels: 3072, max_pixels: 8388608, enable_rotate: true },
-              { text: promptForScreenshot(width, height) }
-            ]
-          }]
-        },
-        parameters: {
-          ocr_options: { task: "advanced_recognition" },
-          max_tokens: 4096
-        }
+    const headers = {
+      Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
+      "Content-Type": "application/json"
+    };
+    const imagePart = { image, min_pixels: 3072, max_pixels: 8388608, enable_rotate: false };
+    const model = process.env.QWEN_OCR_MODEL || DEFAULT_MODEL;
+    const [extractResponse, coordinateResponse] = await Promise.all([
+      fetch(endpoint, {
+        method: "POST",
+        signal: controller.signal,
+        headers,
+        body: JSON.stringify({
+          model,
+          input: {
+            messages: [{
+              role: "user",
+              content: [imagePart, { text: promptForScreenshot(width, height) }]
+            }]
+          },
+          parameters: { max_tokens: 4096, temperature: 0.01 }
+        })
+      }),
+      fetch(endpoint, {
+        method: "POST",
+        signal: controller.signal,
+        headers,
+        body: JSON.stringify({
+          model,
+          input: { messages: [{ role: "user", content: [imagePart] }] },
+          parameters: { ocr_options: { task: "advanced_recognition" } }
+        })
       })
-    });
-    const payload = await upstream.json().catch(() => ({}));
-    if (!upstream.ok) {
-      const upstreamMessage = cleanText(payload?.message || payload?.error?.message || "Qwen OCR 调用失败", 160);
-      return send(response, upstream.status >= 500 ? 502 : 400, { error: upstreamMessage, code: "OCR_UPSTREAM_ERROR" });
+    ]);
+    const [extractPayload, coordinatePayload] = await Promise.all([
+      extractResponse.json().catch(() => ({})),
+      coordinateResponse.json().catch(() => ({}))
+    ]);
+    if (!extractResponse.ok) {
+      const upstreamMessage = cleanText(extractPayload?.message || extractPayload?.error?.message || "Qwen OCR 调用失败", 160);
+      return send(response, extractResponse.status >= 500 ? 502 : 400, { error: upstreamMessage, code: "OCR_UPSTREAM_ERROR" });
     }
-    const { text, words } = extractContent(payload);
+    const { text } = extractContent(extractPayload);
+    const { words } = coordinateResponse.ok ? extractContent(coordinatePayload) : { words: [] };
     const parsed = parseJsonObject(text);
     const items = normalizeItems(parsed?.items, words, width, height);
     if (!items.length) {
@@ -285,10 +316,14 @@ export default async function handler(request, response) {
     return send(response, 200, {
       items,
       meta: {
-        model: process.env.QWEN_OCR_MODEL || DEFAULT_MODEL,
+        model,
         itemCount: items.length,
-        usedCoordinateFallback: !Array.isArray(parsed?.items) || !parsed.items.length,
-        usage: payload?.usage || null
+        coordinateLines: words.length,
+        coordinateRecognitionAvailable: coordinateResponse.ok && words.length > 0,
+        usage: {
+          extraction: extractPayload?.usage || null,
+          coordinates: coordinatePayload?.usage || null
+        }
       }
     });
   } catch (error) {
