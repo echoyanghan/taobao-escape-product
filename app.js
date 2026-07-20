@@ -752,7 +752,7 @@ async function startScreenshotScan(file) {
     state.scanSource = prepared.dataUrl;
     render();
     const endpoint = recognitionApiEndpoint();
-    if (!endpoint) throw new Error("真实识别版正在迁移到 Vercel，请稍后使用新的体验地址");
+    if (!endpoint) throw new Error("真实识别服务尚未配置，请稍后重试");
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
