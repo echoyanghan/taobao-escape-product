@@ -805,8 +805,12 @@ function updateRecognitionProgress() {
   const progress = Math.round(state.scanProgress);
   const progressbar = app.querySelector(".scan-progress-track");
   const fill = progressbar?.querySelector("i");
+  const hint = app.querySelector(".scan-progress-copy p");
   progressbar?.setAttribute("aria-valuenow", String(progress));
   if (fill) fill.style.width = `${progress}%`;
+  if (hint && state.scanPhase === "recognize" && progress >= 54) {
+    hint.textContent = "这一车有点重，逃宝还在认真搬";
+  }
 }
 
 function stopRecognitionProgress() {
@@ -1463,7 +1467,7 @@ function scanView() {
   const reviewCount = state.scanItems.filter((item) => !Number(item.price) || item.priceConfidence < 0.78).length;
   const scanPhases = {
     prepare: { title: "正在读取截图", hint: "压缩图片并准备上传", step: 0 },
-    recognize: { title: "AI 正在识别商品", hint: "正在核对标题、价格和数量，长截图可能需要半分钟以上", step: 1 },
+    recognize: { title: "AI 正在识别商品", hint: "正在逐件核对购物车内容", step: 1 },
     organize: { title: "正在整理结果", hint: "切分商品图并生成可编辑清单", step: 2 }
   };
   const scanPhase = scanPhases[state.scanPhase] || scanPhases.prepare;
@@ -1474,7 +1478,7 @@ function scanView() {
       ? "这张截图暂时没认出来"
       : `识别到 ${state.scanItems.length} 件商品`;
   const heroHint = isLoading
-    ? "长截图可能需要半分钟以上，请不要关闭页面。"
+    ? "正在识别购物车，请保持页面打开。"
     : isError
       ? state.scanError
       : "导入前请核对商品、数量和实际价格。";
