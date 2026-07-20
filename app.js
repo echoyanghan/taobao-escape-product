@@ -1418,7 +1418,7 @@ function scanView() {
           isLoading
             ? `<section class="scan-progress" aria-live="polite">
                 <span class="scan-spinner" aria-hidden="true"></span>
-                <div><strong>Qwen OCR 正在识别</strong><p>读取文字位置 · 区分当前价与优惠 · 划分完整商品</p></div>
+                <div><strong>Qwen 视觉正在识别</strong><p>理解商品布局 · 区分当前价与优惠 · 定位完整商品</p></div>
               </section>`
             : ""
         }
@@ -1436,7 +1436,7 @@ function scanView() {
             ? `<section class="scan-summary">
                 <div><span>已选金额</span><strong>${money.format(scanTotal())}</strong></div>
                 <div><span>需要确认</span><strong>${reviewCount} 件</strong></div>
-                <div><span>识别方式</span><strong>Qwen OCR</strong></div>
+                <div><span>识别方式</span><strong>Qwen 视觉识别</strong></div>
               </section>
               <p class="scan-review-note">AI 可能看错价格。橙色项目请优先核对，确认后再导入。</p>
               <section class="cart-store scan-results">
@@ -1864,7 +1864,7 @@ function mineView() {
       </ol>
       <div class="prototype-legal-note">
         <strong>原型与隐私说明</strong>
-        <p>本项目为独立、非商业产品原型，与淘宝、支付宝、微信及页面所示品牌不存在隶属、授权、合作或背书关系。使用智能识别时，截图会经逃宝服务端转发至阿里云百炼 Qwen OCR，识别完成后本项目不主动保存原图；请避免选择含姓名、地址、手机号等个人信息的图片。</p>
+        <p>本项目为独立、非商业产品原型，与淘宝、支付宝、微信及页面所示品牌不存在隶属、授权、合作或背书关系。使用智能识别时，截图会经逃宝服务端转发至阿里云百炼 Qwen 视觉模型，识别完成后本项目不主动保存原图；请避免选择含姓名、地址、手机号等个人信息的图片。</p>
         <p>页面中的第三方名称、商标与商品图片权利归其各自权利人所有，仅用于原型研究与功能演示，不代表已取得公开传播或商业使用授权。</p>
       </div>
     </section>
