@@ -44,6 +44,7 @@ test("groups OCR text by live coordinates rather than fixed screenshot slices", 
   });
   const words = [
     box("第一件完整商品标题", 260, 190, 700, 230),
+    box("淘宝 测试店；蓝色；M；数量×2", 260, 245, 700, 275),
     box("¥88.20", 270, 300, 410, 342),
     box("第二件完整商品标题", 260, 520, 700, 560),
     box("¥199.00", 270, 630, 430, 674)
@@ -51,6 +52,8 @@ test("groups OCR text by live coordinates rather than fixed screenshot slices", 
   const items = fallbackItemsFromWords(words, 750, 1200);
   assert.equal(items.length, 2);
   assert.equal(items[0].price, 88.2);
+  assert.equal(items[0].qty, 2);
   assert.equal(items[1].title, "第二件完整商品标题");
+  assert.ok(items[0].crop.x >= 0.08 && items[0].crop.w <= 0.25);
   assert.notEqual(items[0].crop.y, items[1].crop.y);
 });
