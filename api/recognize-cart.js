@@ -1,4 +1,4 @@
-const DEFAULT_MODEL = "qwen3.5-ocr";
+const DEFAULT_MODEL = "qwen3-vl-flash";
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 const MAX_ITEMS = 12;
 
@@ -233,14 +233,14 @@ function normalizeItems(rawItems, words, width, height) {
 }
 
 function promptForScreenshot(width, height) {
-  return `你是电商购物车截图识别器。截图尺寸为 ${width}x${height} 像素。请按页面从上到下逐行识别商品，返回严格 JSON，不要 Markdown，不要解释。\n\nJSON 格式：{"items":[{"title":"商品标题","price":实际当前单价或null,"original_price":原价或null,"qty":数量,"spec":"规格","shop":"店铺或平台","row_bbox":[x1,y1,x2,y2],"image_bbox":[x1,y1,x2,y2],"confidence":0到1,"price_confidence":0到1,"warnings":[]}]}\n\n规则：\n1. 先利用商品缩略图、横向分隔线和加减数量控件划分商品行，再识别每一行。返回顺序必须与页面从上到下一致。\n2. 每件商品的 title、price、qty、spec 必须全部来自同一个 row_bbox，禁止跨越分隔线读取，禁止复用上一行的标题或价格。\n3. row_bbox 和 image_bbox 为必填项，必须使用原图像素坐标，左上角为原点。row_bbox 包含整件商品，image_bbox 只包含该行商品主图。\n4. price 只填写同一商品行中醒目显示的单件当前成交价。不要把原价、优惠金额、满减门槛、店铺合计、运费或购物车总价当成 price。\n5. qty 优先读取“数量×N”或该行加减控件中间的数字。规格、平台、数量等辅助文字不要拼进 title。\n6. 只要标题与当前价格都可见，即使商品行在顶部或底部略有裁切也可以返回；缺少标题或价格时才忽略。\n7. 看不清就填 null 并降低 confidence，禁止猜测、补全或创造商品。\n8. 同一商品只返回一次，最多 ${MAX_ITEMS} 件。`;
+  return `你是电商购物车界面理解助手。请理解截图的视觉布局，不要只做逐行文字抄录。截图尺寸为 ${width}x${height} 像素。请从上到下识别每一个完整或大部分可见的商品卡片，并返回严格 JSON，不要 Markdown，不要解释。\n\nJSON 格式：{"items":[{"title":"商品标题","price":实际当前单价或null,"original_price":原价或null,"qty":数量,"spec":"规格","shop":"店铺或平台","row_bbox":[x1,y1,x2,y2],"image_bbox":[x1,y1,x2,y2],"confidence":0到1,"price_confidence":0到1,"warnings":[]}]}\n\n规则：\n1. 利用商品主图、店铺分组、横向分隔和数量控件理解商品卡片；返回顺序必须与页面从上到下一致。\n2. 每件商品的 title、price、qty、spec 必须来自同一个商品卡片，禁止跨卡片拼接。\n3. row_bbox 和 image_bbox 必填，使用原图像素坐标。row_bbox 覆盖商品卡片，image_bbox 只精确框住该商品主图，不含标题和价格。\n4. price 只填写醒目的单件当前成交价。不要把划线原价、优惠金额、满减门槛、合计或运费当成 price。\n5. qty 读取“×N”或数量控件中的数字；规格、店铺、优惠标签不要拼进 title。\n6. 标题与当前价格可见时即可返回；看不清的字段填 null 并降低置信度，禁止猜测。\n7. 同一商品只返回一次，最多 ${MAX_ITEMS} 件。`;
 }
 
 export default async function handler(request, response) {
   setCors(request, response);
   if (request.method === "OPTIONS") return response.status(204).end();
   if (request.method !== "POST") return send(response, 405, { error: "仅支持 POST 请求" });
-  if (!process.env.DASHSCOPE_API_KEY || !process.env.DASHSCOPE_WORKSPACE_ID) {
+  if (!process.env.DASHSCOPE_API_KEY) {
     return send(response, 503, { error: "识别服务尚未配置", code: "SERVICE_NOT_CONFIGURED" });
   }
   let body;
@@ -259,54 +259,38 @@ export default async function handler(request, response) {
   const height = clamp(rawHeight, 320, 30000);
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45000);
-  const endpoint = `https://${process.env.DASHSCOPE_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation`;
+  const timer = setTimeout(() => controller.abort(), 55000);
+  const endpoint = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
   try {
     const headers = {
       Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
       "Content-Type": "application/json"
     };
-    const imagePart = { image, min_pixels: 3072, max_pixels: 8388608, enable_rotate: false };
-    const model = process.env.QWEN_OCR_MODEL || DEFAULT_MODEL;
-    const [extractResponse, coordinateResponse] = await Promise.all([
-      fetch(endpoint, {
-        method: "POST",
-        signal: controller.signal,
-        headers,
-        body: JSON.stringify({
-          model,
-          input: {
-            messages: [{
-              role: "user",
-              content: [imagePart, { text: promptForScreenshot(width, height) }]
-            }]
-          },
-          parameters: { max_tokens: 4096, temperature: 0.01 }
-        })
-      }),
-      fetch(endpoint, {
-        method: "POST",
-        signal: controller.signal,
-        headers,
-        body: JSON.stringify({
-          model,
-          input: { messages: [{ role: "user", content: [imagePart] }] },
-          parameters: { ocr_options: { task: "advanced_recognition" } }
-        })
+    const imagePart = { image, min_pixels: 3072, max_pixels: 8388608 };
+    const model = process.env.QWEN_VISION_MODEL || DEFAULT_MODEL;
+    const extractResponse = await fetch(endpoint, {
+      method: "POST",
+      signal: controller.signal,
+      headers,
+      body: JSON.stringify({
+        model,
+        input: {
+          messages: [{
+            role: "user",
+            content: [imagePart, { text: promptForScreenshot(width, height) }]
+          }]
+        },
+        parameters: { max_tokens: 4096, temperature: 0.01, enable_thinking: false }
       })
-    ]);
-    const [extractPayload, coordinatePayload] = await Promise.all([
-      extractResponse.json().catch(() => ({})),
-      coordinateResponse.json().catch(() => ({}))
-    ]);
+    });
+    const extractPayload = await extractResponse.json().catch(() => ({}));
     if (!extractResponse.ok) {
-      const upstreamMessage = cleanText(extractPayload?.message || extractPayload?.error?.message || "Qwen OCR 调用失败", 160);
-      return send(response, extractResponse.status >= 500 ? 502 : 400, { error: upstreamMessage, code: "OCR_UPSTREAM_ERROR" });
+      const upstreamMessage = cleanText(extractPayload?.message || extractPayload?.error?.message || "Qwen 视觉模型调用失败", 160);
+      return send(response, extractResponse.status >= 500 ? 502 : 400, { error: upstreamMessage, code: "VISION_UPSTREAM_ERROR" });
     }
     const { text } = extractContent(extractPayload);
-    const { words } = coordinateResponse.ok ? extractContent(coordinatePayload) : { words: [] };
     const parsed = parseJsonObject(text);
-    const items = normalizeItems(parsed?.items, words, width, height);
+    const items = normalizeItems(parsed?.items, [], width, height);
     if (!items.length) {
       return send(response, 422, {
         error: "没有识别到完整商品，请上传包含商品标题和价格的购物车截图",
@@ -318,12 +302,9 @@ export default async function handler(request, response) {
       meta: {
         model,
         itemCount: items.length,
-        coordinateLines: words.length,
-        coordinateRecognitionAvailable: coordinateResponse.ok && words.length > 0,
-        usage: {
-          extraction: extractPayload?.usage || null,
-          coordinates: coordinatePayload?.usage || null
-        }
+        coordinateLines: 0,
+        coordinateRecognitionAvailable: items.some((item) => Boolean(item.rowBox && item.crop)),
+        usage: { extraction: extractPayload?.usage || null, coordinates: null }
       }
     });
   } catch (error) {
