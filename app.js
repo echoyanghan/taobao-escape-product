@@ -59,6 +59,13 @@ const logisticsTemplates = [
 ];
 
 const stageDurations = [0, 18, 42, 72, 96, 120];
+const couponTemplates = [
+  { title: "满99减10", threshold: 99, discount: 10 },
+  { title: "满199减20", threshold: 199, discount: 20 },
+  { title: "满299减30", threshold: 299, discount: 30 },
+  { title: "满399减50", threshold: 399, discount: 50 },
+  { title: "满599减80", threshold: 599, discount: 80 }
+];
 
 function loadProfile() {
   try {
@@ -80,6 +87,65 @@ function loadProfile() {
   return profile;
 }
 
+function localDateValue(date = new Date()) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function dayEndIso(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59).toISOString();
+}
+
+function seededRandom(seed) {
+  let value = 0;
+  for (let index = 0; index < seed.length; index += 1) value = (value * 31 + seed.charCodeAt(index)) >>> 0;
+  return () => {
+    value = (value * 1664525 + 1013904223) >>> 0;
+    return value / 4294967296;
+  };
+}
+
+function dailyCouponTemplates(day = localDateValue()) {
+  const random = seededRandom(day);
+  return [...couponTemplates]
+    .map((template) => ({ template, sort: random() }))
+    .sort((a, b) => a.sort - b.sort)
+    .slice(0, 3)
+    .map(({ template }) => template);
+}
+
+function createDailyCoupons(day = localDateValue(), claimed = false) {
+  const now = new Date();
+  const expiresAt = dayEndIso(now);
+  return dailyCouponTemplates(day).map((template) => ({
+    id: `coupon-${day}-${template.threshold}-${template.discount}`,
+    ...template,
+    validDate: day,
+    expiresAt,
+    source: "领券中心",
+    claimedAt: claimed ? now.toISOString() : null,
+    usedOrderId: null
+  }));
+}
+
+function loadCoupons() {
+  const today = localDateValue();
+  const oldClaimed = JSON.parse(localStorage.getItem("taobao_escape_coupon") || "false");
+  try {
+    const savedCoupons = JSON.parse(localStorage.getItem("taobao_escape_coupons") || "[]");
+    const currentCoupons = (Array.isArray(savedCoupons) ? savedCoupons : []).filter((coupon) => {
+      return coupon?.validDate === today && new Date(coupon.expiresAt).getTime() > Date.now();
+    });
+    if (currentCoupons.length) return currentCoupons;
+  } catch (error) {
+    // Fall through to a fresh daily coupon pack.
+  }
+  return createDailyCoupons(today, oldClaimed);
+}
+
 const state = {
   view: "home",
   route: null,
@@ -87,6 +153,10 @@ const state = {
   homeShuffle: 0,
   activeProductId: null,
   reviewReturn: "logistics",
+  logisticsReturn: "success",
+  couponReturn: "mine",
+  mineFocusTarget: "",
+  showOnboarding: localStorage.getItem("taobao_escape_onboarding_seen") !== "true",
   profile: loadProfile(),
   draftLink: "",
   scanItems: [],
@@ -99,7 +169,8 @@ const state = {
   scanError: "",
   scanMeta: null,
   scanRequestId: null,
-  couponClaimed: JSON.parse(localStorage.getItem("taobao_escape_coupon") || "false"),
+  coupons: loadCoupons(),
+  selectedCouponId: localStorage.getItem("taobao_escape_selected_coupon") || "",
   cartManaging: false,
   pendingDeleteId: null,
   ledgerEditing: false,
@@ -136,10 +207,13 @@ const money = new Intl.NumberFormat("zh-CN", {
 });
 
 function save() {
+  state.coupons = loadCurrentCoupons(state.coupons);
   localStorage.setItem("taobao_escape_cart", JSON.stringify(state.cart));
   localStorage.setItem("taobao_escape_orders", JSON.stringify(state.orders));
   localStorage.setItem("taobao_escape_active_order", state.activeOrderId || "");
-  localStorage.setItem("taobao_escape_coupon", JSON.stringify(state.couponClaimed));
+  localStorage.setItem("taobao_escape_coupons", JSON.stringify(state.coupons));
+  localStorage.setItem("taobao_escape_selected_coupon", state.selectedCouponId || "");
+  localStorage.removeItem("taobao_escape_coupon");
   localStorage.setItem("taobao_escape_pay_method", state.payMethod);
   localStorage.setItem("taobao_escape_deleted_messages", JSON.stringify(state.deletedMessageIds));
   localStorage.setItem("taobao_escape_read_messages", JSON.stringify(state.readMessageIds));
@@ -348,8 +422,63 @@ function cartTotal() {
   return selectedCartItems().reduce((sum, item) => sum + item.price * item.qty, 0);
 }
 
+function loadCurrentCoupons(coupons = state.coupons) {
+  const today = localDateValue();
+  const validCoupons = (Array.isArray(coupons) ? coupons : []).filter((coupon) => {
+    return coupon?.validDate === today && new Date(coupon.expiresAt).getTime() > Date.now();
+  });
+  return validCoupons.length ? validCoupons : createDailyCoupons(today);
+}
+
+function activeCoupons() {
+  state.coupons = loadCurrentCoupons(state.coupons);
+  return state.coupons;
+}
+
+function claimedCoupons() {
+  return activeCoupons().filter((coupon) => coupon.claimedAt && !coupon.usedOrderId);
+}
+
+function usableCoupons(total = cartTotal()) {
+  return claimedCoupons().filter((coupon) => total >= coupon.threshold);
+}
+
+function bestCoupon(total = cartTotal()) {
+  return usableCoupons(total).sort((a, b) => b.discount - a.discount || b.threshold - a.threshold)[0] || null;
+}
+
+function selectedCoupon(total = cartTotal()) {
+  if (state.selectedCouponId === "none") return null;
+  const usable = usableCoupons(total);
+  return usable.find((coupon) => coupon.id === state.selectedCouponId) || bestCoupon(total);
+}
+
+function couponExpiryText(coupon) {
+  return `${new Date(coupon.expiresAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 前可用`;
+}
+
+function claimCoupon(id) {
+  const now = new Date().toISOString();
+  state.coupons = activeCoupons().map((coupon) => (coupon.id === id ? { ...coupon, claimedAt: coupon.claimedAt || now } : coupon));
+  const claimed = state.coupons.find((coupon) => coupon.id === id);
+  if (claimed && state.selectedCouponId !== "none") state.selectedCouponId = claimed.id;
+  showToast(claimed ? `${claimed.title} 已领取` : "今日券包已更新");
+  save();
+  render();
+}
+
+function claimAllCoupons() {
+  const now = new Date().toISOString();
+  state.coupons = activeCoupons().map((coupon) => ({ ...coupon, claimedAt: coupon.claimedAt || now }));
+  const selected = bestCoupon();
+  if (selected && state.selectedCouponId !== "none") state.selectedCouponId = selected.id;
+  showToast("今日券包已领取，结算时可选择使用");
+  save();
+  render();
+}
+
 function checkoutDiscount() {
-  return state.couponClaimed ? Math.min(10, cartTotal()) : 0;
+  return Math.min(selectedCoupon()?.discount || 0, cartTotal());
 }
 
 function payableTotal() {
@@ -581,6 +710,7 @@ function createOrder() {
   const selectedItems = selectedCartItems();
   if (!selectedItems.length) return;
   const total = toMoney(cartTotal());
+  const coupon = selectedCoupon(total);
   const discount = toMoney(checkoutDiscount());
   const payable = toMoney(payableTotal());
   const now = new Date();
@@ -603,9 +733,16 @@ function createOrder() {
     orderNumber: `TB${String(createdTimestamp).slice(-10)}`,
     trackingNumber: `YT${String(createdTimestamp).slice(-9)}${orderItems.length}`,
     carrier: "逃宝标准达",
-    packageWeight: estimatePackageWeight(orderItems)
+    packageWeight: estimatePackageWeight(orderItems),
+    couponId: coupon?.id || null,
+    couponTitle: coupon?.title || "",
+    couponDiscount: discount
   };
   state.orders.unshift(order);
+  if (coupon) {
+    state.coupons = activeCoupons().map((item) => (item.id === coupon.id ? { ...item, usedOrderId: order.id } : item));
+    state.selectedCouponId = "";
+  }
   state.cart = state.cart.filter((item) => item.selected === false);
   state.activeOrderId = order.id;
   state.route = "success";
@@ -1114,6 +1251,7 @@ function shell(content) {
       <div class="content">${content}</div>
       ${bottomNav()}
       ${toastView()}
+      ${onboardingView()}
       ${deleteConfirmView()}
       ${ledgerEditorView()}
       ${ledgerDeleteConfirmView()}
@@ -1124,6 +1262,26 @@ function shell(content) {
 
 function toastView() {
   return state.toast ? `<div class="toast">${esc(state.toast)}</div>` : "";
+}
+
+function onboardingView() {
+  if (!state.showOnboarding || state.view !== "home" || state.route) return "";
+  return `
+    <div class="onboarding-sheet">
+      <div class="onboarding-card">
+        <div>
+          <span>第一次来逃宝</span>
+          <h3>今晚先拍下，明早再决定</h3>
+        </div>
+        <ol>
+          <li><i>1</i><span>上传淘宝购物车截图</span></li>
+          <li><i>2</i><span>先完成一次模拟结算</span></li>
+          <li><i>3</i><span>明早逐件确认还想不想要</span></li>
+        </ol>
+        <button data-close-onboarding type="button">知道了</button>
+      </div>
+    </div>
+  `;
 }
 
 function deleteConfirmView() {
@@ -1249,11 +1407,28 @@ function messageItems() {
       orderId: order.id
     };
   });
-  return [
-    ...orderMessages,
-    { id: "promotion", icon: "🎟️", title: "活动优惠", text: "你有一张店铺优惠券可在结算时使用。" },
-    { id: "assistant", icon: "💬", title: "逃宝助手", text: "购物车截图可以一次导入多件商品。" }
-  ].filter((message) => !state.deletedMessageIds.includes(message.id));
+  const coupons = activeCoupons();
+  const claimableCount = coupons.filter((coupon) => !coupon.claimedAt).length;
+  const messages = [...orderMessages];
+  if (claimableCount) {
+    messages.push({
+      id: `promotion-${localDateValue()}`,
+      icon: "券",
+      title: "活动优惠",
+      text: `今日有 ${claimableCount} 张优惠券可领取：${couponSummaryText(coupons)}。`,
+      target: "coupons"
+    });
+  }
+  if (pendingCount()) {
+    messages.push({
+      id: `assistant-pending-${localDateValue()}`,
+      icon: "逃",
+      title: "逃宝助手",
+      text: `昨晚拍下的 ${pendingCount()} 件商品待确认，处理后会更新已省账本。`,
+      target: "pending"
+    });
+  }
+  return messages.filter((message) => !state.deletedMessageIds.includes(message.id));
 }
 
 function unreadMessages() {
@@ -1329,6 +1504,56 @@ function activeProduct() {
   return antiProducts.find((item) => item.id === state.activeProductId) || antiProducts[0];
 }
 
+function couponSummaryText(coupons = activeCoupons()) {
+  return coupons
+    .slice(0, 3)
+    .map((coupon) => coupon.title)
+    .join("｜");
+}
+
+function homePendingTaskView() {
+  const order = pendingOrder();
+  if (!order) return "";
+  return `
+    <section class="home-task-strip">
+      <div>
+        <span>待你确认</span>
+        <strong>昨晚拍下的 ${pendingCount()} 件，今天还想要吗？</strong>
+      </div>
+      <button data-review-pending type="button">去确认</button>
+    </section>
+  `;
+}
+
+function couponCenterBannerView() {
+  const coupons = activeCoupons();
+  const unclaimedCount = coupons.filter((coupon) => !coupon.claimedAt).length;
+  return `
+    <button class="coupon-center-card" data-home-action="coupon" type="button">
+      <div class="coupon-center-head">
+        <div>
+          <span>领券中心</span>
+          <h3>今日可领优惠</h3>
+          <p>23:59 前有效，结算时可选择使用</p>
+        </div>
+        <strong>${unclaimedCount ? "去领券" : "查看券包"}</strong>
+      </div>
+      <div class="home-coupon-stack" aria-hidden="true">
+        ${coupons
+          .map(
+            (coupon) => `
+              <span class="home-coupon-ticket">
+                <em>¥${coupon.discount}</em>
+                <small>满${coupon.threshold}可用</small>
+              </span>
+            `
+          )
+          .join("")}
+      </div>
+    </button>
+  `;
+}
+
 function homeView() {
   const products = homeProducts();
   return shell(`
@@ -1376,31 +1601,8 @@ function homeView() {
       <p class="prototype-disclosure">独立体验原型 · 非淘宝官方 · 不产生真实交易</p>
     </section>
 
-    <section class="section">
-      <div class="quick-grid compact">
-        ${[
-          ["✓", pendingCount() ? `待确认 ${pendingCount()}` : "待确认", 'data-review-pending="true"'],
-          ["省", "已省账本", 'data-route="ledger"'],
-          ["券", state.couponClaimed ? "券已领取" : "领券中心", 'data-home-action="coupon"'],
-          ["车", "购物车", 'data-view="cart"']
-        ]
-          .map(([icon, text, action]) => `<button class="quick" ${action} type="button"><i>${icon}</i><span>${text}</span></button>`)
-          .join("")}
-      </div>
-    </section>
-
-    <div class="banner-row">
-      <button class="banner dark" data-home-action="coupon" type="button">
-        <h3>超级立减</h3>
-        <p>热门商品限时直降，领券结算更划算</p>
-        <span class="coupon">${state.couponClaimed ? "已领取" : "满 199 减 20"}</span>
-      </button>
-      <button class="banner" data-home-tab="保健自律" type="button">
-        <h3>深夜补给站</h3>
-        <p>健康计划已加入购物车，执行进度等待发货</p>
-        <span class="coupon">去逛逛</span>
-      </button>
-    </div>
+    ${homePendingTaskView()}
+    ${couponCenterBannerView()}
 
     <div class="feed-heading">
       <div class="feed-title">
@@ -1577,6 +1779,7 @@ function cartView() {
     `);
   }
 
+  const claimableCoupons = activeCoupons().filter((coupon) => !coupon.claimedAt);
   return shell(`
     <header class="page-top">
       <div class="page-title">
@@ -1587,8 +1790,8 @@ function cartView() {
     <section class="cart-store">
       <div class="cart-head">
         <h3>逃宝 明早再说旗舰店 ›</h3>
-        <button class="coupon-link ${state.couponClaimed ? "claimed" : ""}" data-claim-coupon type="button">${
-          state.couponClaimed ? "满减券已领取" : "领满减券 ›"
+        <button class="coupon-link ${claimableCoupons.length ? "" : "claimed"}" data-claim-all-coupons type="button">${
+          claimableCoupons.length ? "领满减券 ›" : "今日券已领取"
         }</button>
       </div>
       ${state.cart
@@ -1600,7 +1803,7 @@ function cartView() {
               <div class="item-info">
                 <div class="item-title">${esc(item.title)}</div>
                 <div class="spec">${esc(item.platform)}${item.spec ? "；" + esc(item.spec) : ""}; 数量 ×${item.qty} ›</div>
-                <div class="labels"><span>${state.couponClaimed ? "满减券已用" : "满减券待领"}</span><span>明早确认</span><span>${esc(item.note)}</span></div>
+                <div class="labels"><span>${claimedCoupons().length ? "满减券可用" : "满减券待领"}</span><span>明早确认</span><span>${esc(item.note)}</span></div>
                 <div class="item-bottom">
                   <span class="price">${money.format(item.price)}</span>
                   <div class="qty-stepper">
@@ -1634,8 +1837,46 @@ function cartView() {
   `);
 }
 
+function checkoutCouponView() {
+  const total = cartTotal();
+  const coupons = claimedCoupons();
+  const selected = selectedCoupon(total);
+  if (!coupons.length) {
+    return `
+      <article class="pay-card coupon-select-card">
+        <div class="pay-method-head"><span>店铺优惠</span><button data-claim-all-coupons type="button">领取今日券</button></div>
+        <p class="hint">领取后，满足门槛的优惠券可在结算时使用。</p>
+      </article>
+    `;
+  }
+  return `
+    <article class="pay-card coupon-select-card">
+      <div class="pay-method-head"><span>店铺优惠</span><strong>${selected ? selected.title : "不使用优惠"}</strong></div>
+      <div class="coupon-choice-list">
+        ${coupons
+          .map((coupon) => {
+            const disabled = total < coupon.threshold;
+            const active = selected?.id === coupon.id;
+            return `
+              <button class="coupon-choice ${active ? "active" : ""}" data-select-coupon="${coupon.id}" ${disabled ? "disabled" : ""} type="button">
+                <strong>${coupon.title}</strong>
+                <span>${disabled ? `还差 ${money.format(coupon.threshold - total)} 可用` : couponExpiryText(coupon)}</span>
+              </button>
+            `;
+          })
+          .join("")}
+        <button class="coupon-choice ${state.selectedCouponId === "none" ? "active" : ""}" data-select-coupon="none" type="button">
+          <strong>不使用优惠</strong>
+          <span>保留券包，本单原价模拟支付</span>
+        </button>
+      </div>
+    </article>
+  `;
+}
+
 function checkoutView() {
   const checkoutItems = selectedCartItems();
+  const coupon = selectedCoupon();
   return `
     <div class="app">
       <section class="checkout-page">
@@ -1663,12 +1904,13 @@ function checkoutView() {
         </article>
         <article class="pay-card">
           <div class="row"><span>配送方式</span><strong>逃宝标准达</strong></div>
-          <div class="row"><span>店铺优惠</span><strong>${state.couponClaimed ? "满减券已使用" : "可用满减券"}</strong></div>
+          <div class="row"><span>店铺优惠</span><strong>${coupon ? coupon.title : "未使用优惠券"}</strong></div>
           <div class="row"><span>预计送达</span><strong>明早 09:00 前</strong></div>
         </article>
+        ${checkoutCouponView()}
         <article class="pay-card">
           <div class="row"><span>商品金额</span><strong>${money.format(cartTotal())}</strong></div>
-          <div class="row"><span>店铺优惠${state.couponClaimed ? "（已使用）" : ""}</span><strong class="danger">-${money.format(checkoutDiscount())}</strong></div>
+          <div class="row"><span>店铺优惠${coupon ? `（${coupon.title}）` : ""}</span><strong class="danger">-${money.format(checkoutDiscount())}</strong></div>
           <div class="row"><span>运费</span><strong>¥0</strong></div>
           <div class="row"><span>应付总额</span><strong class="danger">${money.format(payableTotal())}</strong></div>
         </article>
@@ -1696,6 +1938,52 @@ function checkoutView() {
       ${bottomNav()}
     </div>
   `;
+}
+
+function couponsView() {
+  const coupons = activeCoupons();
+  const claimableCount = coupons.filter((coupon) => !coupon.claimedAt).length;
+  const claimedCount = coupons.filter((coupon) => coupon.claimedAt && !coupon.usedOrderId).length;
+  return shell(`
+    <section class="coupon-page">
+      <header class="coupon-page-head">
+        <div class="plain-top"><button class="back" data-coupon-back type="button">‹</button><div><span>领券中心</span><h2>优惠券</h2></div></div>
+        <p>每天更新，今晚下单时可直接使用</p>
+        <div class="coupon-page-stats"><span>今日共 ${coupons.length} 张</span><strong>${claimedCount} 张待使用</strong></div>
+      </header>
+      <section class="coupon-wallet-panel">
+        <div class="account-section-head">
+          <div><span>今日可领</span><h3>限时优惠</h3></div>
+          <button data-claim-all-coupons type="button">${claimableCount ? "一键领取" : "已领取"}</button>
+        </div>
+        <p class="coupon-page-note">有效期至今日 23:59，满足订单金额即可在结算时选择。</p>
+        <div class="coupon-ticket-list">
+          ${coupons
+            .map(
+              (coupon) => `
+                <article class="coupon-ticket ${coupon.claimedAt ? "claimed" : ""} ${coupon.usedOrderId ? "used" : ""}">
+                  <div class="coupon-ticket-price">
+                    <small>¥</small><strong>${coupon.discount}</strong>
+                  </div>
+                  <div class="coupon-ticket-main">
+                    <strong>${coupon.title}</strong>
+                    <span>${couponExpiryText(coupon)} · ${coupon.source}</span>
+                  </div>
+                  ${
+                    coupon.usedOrderId
+                      ? `<span class="coupon-ticket-state">已使用</span>`
+                      : coupon.claimedAt
+                        ? `<span class="coupon-ticket-state">已领取</span>`
+                        : `<button data-claim-coupon="${coupon.id}" type="button">领取</button>`
+                  }
+                </article>
+              `
+            )
+            .join("")}
+        </div>
+      </section>
+    </section>
+  `);
 }
 
 function payingView() {
@@ -1729,7 +2017,7 @@ function successView() {
           <h2>支付成功</h2>
           <div class="saved-big">+${money.format(orderPayable(order))}</div>
           <p class="hint">已计入已省金额，其中 ${money.format(orderPayable(order))} 待明早逐件确认。这是逃宝体验订单，未发起真实扣款。</p>
-          <button class="primary full" data-route="logistics" type="button">查看交易物流</button>
+          <button class="primary full" data-route="logistics" data-logistics-return="success" type="button">查看交易物流</button>
         </article>
       </section>
       ${bottomNav()}
@@ -1744,7 +2032,7 @@ function logisticsView() {
   return `
     <div class="app">
       <section class="logistics-page">
-        <div class="plain-top"><button class="back" data-route="success" type="button">‹</button><h2>交易物流</h2></div>
+        <div class="plain-top"><button class="back" data-logistics-back type="button">‹</button><h2>交易物流</h2></div>
         <article class="timeline">
           ${timeline
             .map(
@@ -1840,7 +2128,13 @@ function messagesView() {
                   ? `<button class="message-check ${state.selectedMessageIds.includes(message.id) ? "checked" : ""}" data-toggle-message="${message.id}" type="button" aria-label="选择消息"></button>`
                   : ""
               }
-              <button class="message-open" ${message.orderId && !state.messagesManaging ? `data-open-order="${message.orderId}" data-message-id="${message.id}"` : `data-read-message="${message.id}"`} type="button">
+              <button class="message-open" ${
+                message.orderId && !state.messagesManaging
+                  ? `data-open-order="${message.orderId}" data-message-id="${message.id}"`
+                  : message.target && !state.messagesManaging
+                    ? `data-message-target="${message.target}" data-message-id="${message.id}"`
+                    : `data-read-message="${message.id}"`
+              } type="button">
               <div class="message-icon">${message.icon}</div>
               <div class="message-main">
                 <strong>${message.title}</strong>
@@ -1873,6 +2167,7 @@ function mineView() {
   const nextOrder = pendingOrder();
   const nextItem = nextOrder?.items?.find((item) => item.decision === "pending" && !item.ledgerDeleted);
   const completedItems = confirmedSavedCount() + rationalCount();
+  const availableCouponCount = claimedCoupons().filter((coupon) => !coupon.usedOrderId).length;
 
   return shell(`
     <header class="account-profile-head">
@@ -1900,7 +2195,7 @@ function mineView() {
       <div class="asset-summary">
         <div><strong>${money.format(todayAmount())}</strong><span>今日已省</span></div>
         <div><strong>${money.format(weekAmount())}</strong><span>本周已省</span></div>
-        <div><strong>${state.couponClaimed ? 1 : 0}</strong><span>可用优惠券</span></div>
+        <button data-route="coupons" data-coupon-return="mine" type="button"><strong>${availableCouponCount}</strong><span>可用优惠券</span></button>
       </div>
     </section>
 
@@ -2053,12 +2348,18 @@ function render() {
   else if (state.route === "logistics") app.innerHTML = logisticsView();
   else if (state.route === "review") app.innerHTML = reviewView();
   else if (state.route === "ledger") app.innerHTML = ledgerView();
+  else if (state.route === "coupons") app.innerHTML = couponsView();
   else if (state.view === "cart") app.innerHTML = cartView();
   else if (state.view === "messages") app.innerHTML = messagesView();
   else if (state.view === "mine") app.innerHTML = mineView();
   else app.innerHTML = homeView();
   renderedScreenKey = nextScreenKey;
   restoreScrollPositions(scrollPositions);
+  if (state.view === "mine" && !state.route && state.mineFocusTarget) {
+    const target = app.querySelector(`.${state.mineFocusTarget}`);
+    state.mineFocusTarget = "";
+    window.requestAnimationFrame(() => target?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
 }
 
 app.addEventListener("touchstart", (event) => {
@@ -2128,18 +2429,27 @@ app.addEventListener("click", (event) => {
   const mineTargetButton = event.target.closest("[data-mine-target]");
   const ledgerFilterButton = event.target.closest("[data-ledger-filter]");
   const ledgerDayButton = event.target.closest("[data-ledger-day]");
+  const claimCouponButton = event.target.closest("[data-claim-coupon]");
+  const selectCouponButton = event.target.closest("[data-select-coupon]");
+  const messageTargetButton = event.target.closest("[data-message-target]");
 
   if (event.target.closest("#manualInput")) {
     state.draftLink = "";
     openImport("manual");
   }
+  if (event.target.closest("[data-close-onboarding]")) {
+    state.showOnboarding = false;
+    localStorage.setItem("taobao_escape_onboarding_seen", "true");
+    render();
+  }
   if (event.target.closest("#uploadScreenshot")) app.querySelector("#screenshotInput")?.click();
   if (event.target.closest("#importScan")) importScanItems();
   const toggleScanButton = event.target.closest("[data-toggle-scan]");
   if (toggleScanButton) toggleScanItem(toggleScanButton.dataset.toggleScan);
-  if (event.target.closest("[data-claim-coupon]")) {
-    state.couponClaimed = true;
-    showToast("满 199 减 20 券已领取，结算自动抵扣");
+  if (claimCouponButton) claimCoupon(claimCouponButton.dataset.claimCoupon);
+  if (event.target.closest("[data-claim-all-coupons]")) claimAllCoupons();
+  if (selectCouponButton) {
+    state.selectedCouponId = selectCouponButton.dataset.selectCoupon;
     save();
     render();
   }
@@ -2150,11 +2460,9 @@ app.addEventListener("click", (event) => {
     render();
   }
   if (homeActionButton?.dataset.homeAction === "coupon") {
-    if (!state.couponClaimed) {
-      state.couponClaimed = true;
-      showToast("满 199 减 20 券已放入账户，结算自动抵扣");
-      save();
-    } else showToast("满减券已经在账户里");
+    state.couponReturn = "home";
+    state.route = "coupons";
+    showToast("今日券包已更新");
     render();
   }
   if (homeActionButton?.dataset.homeAction === "shuffle") {
@@ -2290,6 +2598,7 @@ app.addEventListener("click", (event) => {
   if (routeButton) {
     if (routeButton.hasAttribute("data-complete-logistics")) completeActiveOrderLogistics();
     if (routeButton.dataset.route === "review") state.reviewReturn = "logistics";
+    if (routeButton.dataset.route === "logistics") state.logisticsReturn = routeButton.dataset.logisticsReturn || state.logisticsReturn || state.view || "success";
     if (routeButton.dataset.route === "ledger") {
       state.ledgerFilter = "all";
       state.ledgerPage = 1;
@@ -2297,11 +2606,28 @@ app.addEventListener("click", (event) => {
       state.ledgerSelectedIds = [];
       state.ledgerOpenDays = Object.keys(groupLedgerRecordsByDate()).slice(0, 1);
     }
+    if (routeButton.dataset.route === "coupons") {
+      state.couponReturn = routeButton.dataset.couponReturn || state.view || "mine";
+    }
     state.route = routeButton.dataset.route;
     render();
   }
   if (backButton) {
     state.view = backButton.dataset.back;
+    state.route = null;
+    render();
+  }
+  if (event.target.closest("[data-logistics-back]")) {
+    if (state.logisticsReturn === "messages" || state.logisticsReturn === "mine" || state.logisticsReturn === "cart" || state.logisticsReturn === "home") {
+      state.view = state.logisticsReturn;
+      state.route = null;
+    } else {
+      state.route = "success";
+    }
+    render();
+  }
+  if (event.target.closest("[data-coupon-back]")) {
+    state.view = state.couponReturn || "mine";
     state.route = null;
     render();
   }
@@ -2329,7 +2655,26 @@ app.addEventListener("click", (event) => {
     const messageId = openOrder.dataset.messageId;
     if (messageId) state.readMessageIds = [...new Set([...state.readMessageIds, messageId])];
     state.activeOrderId = openOrder.dataset.openOrder;
+    state.logisticsReturn = state.view === "messages" ? "messages" : state.view === "mine" ? "mine" : "success";
     state.route = "logistics";
+    save();
+    render();
+  }
+  if (messageTargetButton && !state.messagesManaging) {
+    const messageId = messageTargetButton.dataset.messageId;
+    if (messageId) state.readMessageIds = [...new Set([...state.readMessageIds, messageId])];
+    if (messageTargetButton.dataset.messageTarget === "coupons") {
+      state.couponReturn = "messages";
+      state.route = "coupons";
+    }
+    if (messageTargetButton.dataset.messageTarget === "pending") {
+      const order = pendingOrder();
+      if (order) {
+        state.activeOrderId = order.id;
+        state.reviewReturn = "mine";
+        state.route = "review";
+      }
+    }
     save();
     render();
   }
