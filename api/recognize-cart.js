@@ -11,6 +11,7 @@ function setCors(request, response) {
   const origin = request.headers.origin || "";
   const allowedOrigins = new Set([
     "https://echoyanghan.github.io",
+    "https://taobao-escape-product.vercel.app",
     process.env.PUBLIC_APP_ORIGIN || ""
   ]);
   const isSameHost = origin && request.headers.host && new URL(origin).host === request.headers.host;
