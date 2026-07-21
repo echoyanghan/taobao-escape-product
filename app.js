@@ -368,6 +368,16 @@ function orderPayable(order) {
   return toMoney(order?.payableTotal ?? order?.total ?? 0);
 }
 
+function importedItemAmount(item) {
+  const quantity = Math.max(1, Number(item?.qty) || 1);
+  const unitPrice = Number(item?.unitPrice ?? item?.price) || 0;
+  return toMoney(item?.subtotal ?? unitPrice * quantity);
+}
+
+function orderSavedAmount(order) {
+  return toMoney((order?.items || []).reduce((sum, item) => sum + importedItemAmount(item), 0));
+}
+
 function ledgerId(order, item) {
   return `${order.id}::${item.id}`;
 }
@@ -391,7 +401,7 @@ function savedRecords() {
 }
 
 function savedAmount() {
-  return savedRecords().reduce((sum, { item }) => sum + item.finalAmount, 0);
+  return savedRecords().reduce((sum, { item }) => sum + importedItemAmount(item), 0);
 }
 
 function confirmedSavedCount() {
@@ -409,7 +419,7 @@ function rationalCount() {
 function pendingAmount() {
   return ledgerRecords()
     .filter(({ item }) => item.decision === "pending")
-    .reduce((sum, { item }) => sum + item.finalAmount, 0);
+    .reduce((sum, { item }) => sum + importedItemAmount(item), 0);
 }
 
 function pendingOrder() {
@@ -1072,7 +1082,7 @@ function setItemDecision(orderId, itemId, decision) {
     decidedTimestamp: Date.now(),
     decidedAt: new Date().toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
   }));
-  const label = decision === "rational" ? `已调整 -${money.format(state.orders.find((order) => order.id === orderId)?.items.find((item) => item.id === itemId)?.finalAmount || 0)}，这件商品已转为理性购买` : "已确认省下，这件商品继续留在已省金额里";
+  const label = decision === "rational" ? `已调整 -${money.format(importedItemAmount(state.orders.find((order) => order.id === orderId)?.items.find((item) => item.id === itemId)))}，这件商品已转为理性购买` : "已确认省下，这件商品继续留在已省金额里";
   showToast(label);
   save();
   render();
@@ -1097,7 +1107,8 @@ function updateLedgerOrder() {
   const nextStatus = statusInput?.value || record.item.decision;
   updateOrderItem(record.order.id, record.item.id, (item) => ({
     ...item,
-    finalAmount: nextTotal,
+    subtotal: nextTotal,
+    finalAmount: toMoney(Math.max(0, nextTotal - (Number(item.allocatedDiscount) || 0))),
     decision: decisionText[nextStatus] ? nextStatus : item.decision,
     manualAdjusted: true,
     adjustedAt: new Date().toLocaleString("zh-CN", {
@@ -1157,13 +1168,13 @@ function todayAmount() {
   const today = dateKey();
   return savedRecords()
     .filter(({ order }) => (order.dateKey || "今天") === today)
-    .reduce((sum, { item }) => sum + item.finalAmount, 0);
+    .reduce((sum, { item }) => sum + importedItemAmount(item), 0);
 }
 
 function weekAmount() {
   return savedRecords()
     .slice(0, 7)
-    .reduce((sum, { item }) => sum + item.finalAmount, 0);
+    .reduce((sum, { item }) => sum + importedItemAmount(item), 0);
 }
 
 function filteredLedgerRecords() {
@@ -1204,7 +1215,7 @@ function ledgerRecordView({ order, item, id }, editing = false) {
             </div>`
       }
       <div class="ledger-order-side">
-        <span>${money.format(item.finalAmount)}</span>
+        <span>${money.format(importedItemAmount(item))}</span>
         ${editing ? `<i>›</i>` : ""}
       </div>
     </article>
@@ -1216,7 +1227,7 @@ function sumByTimeSlot() {
   const totals = Object.fromEntries(slots.map((slot) => [slot, 0]));
   savedRecords().forEach(({ order, item }) => {
     const slot = order.timeSlot || "23:00-02:00";
-    totals[slot] = (totals[slot] || 0) + item.finalAmount;
+    totals[slot] = (totals[slot] || 0) + importedItemAmount(item);
   });
   return totals;
 }
@@ -1224,7 +1235,7 @@ function sumByTimeSlot() {
 function sumByCategory() {
   return savedRecords().reduce((result, { item }) => {
     const category = item.category || "其他";
-    result[category] = (result[category] || 0) + item.finalAmount;
+    result[category] = (result[category] || 0) + importedItemAmount(item);
     return result;
   }, {});
 }
@@ -1317,8 +1328,8 @@ function ledgerEditorView() {
         <h3>调整账本记录</h3>
         <p>${esc(item.title || "购物车商品")}</p>
         <label class="field">
-          <span>金额</span>
-          <input id="ledgerAmount" type="number" min="0" step="0.1" value="${item.finalAmount}" />
+          <span>导入金额</span>
+          <input id="ledgerAmount" type="number" min="0" step="0.1" value="${importedItemAmount(item)}" />
         </label>
         <div class="status-options">
           ${statusOptions
@@ -2008,6 +2019,7 @@ function payingView() {
 
 function successView() {
   const order = activeOrder();
+  const saved = orderSavedAmount(order);
   return `
     <div class="app">
       <section class="success-page">
@@ -2015,8 +2027,8 @@ function successView() {
         <article class="result-card">
           <p class="mini">${esc(state.payMethod)} · ${money.format(orderPayable(order))}</p>
           <h2>支付成功</h2>
-          <div class="saved-big">+${money.format(orderPayable(order))}</div>
-          <p class="hint">已计入已省金额，其中 ${money.format(orderPayable(order))} 待明早逐件确认。这是逃宝体验订单，未发起真实扣款。</p>
+          <div class="saved-big">+${money.format(saved)}</div>
+          <p class="hint">已计入已省金额，其中 ${money.format(saved)} 待明早逐件确认。这是逃宝体验订单，未发起真实扣款。</p>
           <button class="primary full" data-route="logistics" data-logistics-return="success" type="button">查看交易物流</button>
         </article>
       </section>
@@ -2082,7 +2094,7 @@ function reviewView() {
                   <div class="item-info">
                     <div class="item-title">${esc(item.title)}</div>
                     <div class="spec">${esc(item.spec || "默认规格")}；数量 ×${item.qty}</div>
-                    <div class="price">${money.format(item.finalAmount)}</div>
+                    <div class="price">${money.format(importedItemAmount(item))}</div>
                     <div class="decision-pill">${decisionText[item.decision]}</div>
                     ${
                       item.decision === "pending"
@@ -2206,7 +2218,7 @@ function mineView() {
             <article class="pending-product">
               <div class="ledger-thumb">${nextItem.image ? `<img src="${nextItem.image}" alt="${esc(nextItem.title)}" />` : nextItem.icon || "🛍️"}</div>
               <div><strong>${esc(nextItem.title)}</strong><span>${esc(nextItem.spec || "默认规格")} · 数量 ×${nextItem.qty}</span></div>
-              <div class="pending-product-action"><strong>${money.format(nextItem.finalAmount)}</strong><button data-review-pending type="button">去确认</button></div>
+              <div class="pending-product-action"><strong>${money.format(importedItemAmount(nextItem))}</strong><button data-review-pending type="button">去确认</button></div>
             </article>
           </section>`
         : ""
@@ -2267,7 +2279,7 @@ function ledgerView() {
   const daySections = days
     .map(([day, dayRecords]) => {
       const isOpen = openDays.includes(day);
-      const total = dayRecords.reduce((sum, { item }) => sum + item.finalAmount, 0);
+      const total = dayRecords.reduce((sum, { item }) => sum + importedItemAmount(item), 0);
       return `
         <section class="ledger-day full-ledger-day">
           <button class="ledger-day-toggle" data-ledger-day="${esc(day)}" type="button" aria-expanded="${isOpen}">
